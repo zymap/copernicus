@@ -1,18 +1,29 @@
 package conf
 
 import (
-	"flag"
+	"errors"
+	"fmt"
+	"gopkg.in/go-playground/validator.v8"
 	"io"
+	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"time"
 
-	"github.com/copernet/copernicus/model"
-	"github.com/copernet/copernicus/util"
 	"github.com/spf13/viper"
-	"gopkg.in/go-playground/validator.v8"
+	"path"
+)
+
+const (
+	AppMajor uint = 0
+	AppMinor uint = 0
+	AppPatch uint = 1
+
+	// AppPreRelease MUST only contain characters from semanticAlphabet
+	// per the semantic versioning spec.
+	AppPreRelease = "beta"
 )
 
 const (
@@ -21,9 +32,6 @@ const (
 	defaultConfigFilename       = "conf.yml"
 	defaultDataDirname          = "coper"
 	defaultProjectDir           = "github.com/copernet/copernicus"
-	defaultLogLevel             = "info"
-	defaultLogDirname           = "logs"
-	defaultLogFilename          = "coper.log"
 	defaultMaxPeers             = 125
 	defaultBanDuration          = time.Hour * 24
 	defaultBanThreshold         = 100
@@ -31,7 +39,6 @@ const (
 	defaultMaxRPCClients        = 10
 	defaultMaxRPCWebsockets     = 25
 	defaultMaxRPCConcurrentReqs = 20
-	defaultDbType               = "ffldb"
 	defaultFreeTxRelayLimit     = 15.0
 	defaultBlockMinSize         = 0
 	defaultBlockMaxSize         = 750000
@@ -56,95 +63,13 @@ const (
 	defaultMaxMempoolSize        = 300
 )
 
-var Cfg *Configuration
-
-var DataDir string
-
-// init configuration
-func initConfig() *Configuration {
-	// parse command line parameter to set program datadir
-	defaultDataDir := util.AppDataDir(defaultDataDirname, false)
-
-	getdatadir := flag.String("datadir", defaultDataDir, "specified program data dir")
-	flag.Parse()
-
-	DataDir = defaultDataDir
-	if getdatadir != nil {
-		DataDir = *getdatadir
-	}
-
-	if !ExistDataDir(DataDir) {
-		err := os.MkdirAll(DataDir, os.ModePerm)
-		if err != nil {
-			panic("datadir create failed: " + err.Error())
-		}
-
-		// get GOPATH environment and copy conf file to dst dir
-		gopath := os.Getenv("GOPATH")
-		if gopath != "" {
-			// first try
-			projectPath := gopath + "/src/" + defaultProjectDir
-			filePath := projectPath + "/conf/" + defaultConfigFilename
-			_, err = os.Stat(filePath)
-			if !os.IsNotExist(err) {
-				CopyFile(filePath, DataDir+"/"+defaultConfigFilename)
-			} else {
-				// second try
-				projectPath = gopath + "/src/copernicus"
-				filePath = projectPath + "/conf/" + defaultConfigFilename
-				CopyFile(filePath, DataDir+"/"+defaultConfigFilename)
-			}
-		}
-	}
-
-	config := &Configuration{}
-	viper.SetConfigType("yaml")
-
-	//parse struct tag
-	c := Configuration{}
-	t := reflect.TypeOf(c)
-	v := reflect.ValueOf(c)
-
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		if v.Field(i).Type().Kind() != reflect.Struct {
-			key := field.Name
-			value := field.Tag.Get(tagName)
-			//set default value
-			viper.SetDefault(key, value)
-			//log.Printf("key is: %v,value is: %v\n", key, value)
-		} else {
-			structField := v.Field(i).Type()
-			for j := 0; j < structField.NumField(); j++ {
-				key := structField.Field(j).Name
-				values := structField.Field(j).Tag.Get(tagName)
-				viper.SetDefault(key, values)
-				//log.Printf("key is: %v,value is: %v\n", key, values)
-			}
-			continue
-		}
-	}
-
-	// parse config
-	file := must(os.Open(DataDir + "/conf.yml")).(*os.File)
-	defer file.Close()
-	must(nil, viper.ReadConfig(file))
-	must(nil, viper.Unmarshal(config))
-
-	// set data dir
-	config.DataDir = DataDir
-
-	config.RPC.RPCKey = filepath.Join(defaultDataDir, "rpc.key")
-	config.RPC.RPCCert = filepath.Join(defaultDataDir, "rpc.cert")
-	return config
-}
-
 // Configuration defines all configurations for application
 type Configuration struct {
 	GoVersion string `validate:"require"` //description:"Display version information and exit"
 	Version   string `validate:"require"` //description:"Display version information of copernicus"
 	BuildDate string `validate:"require"` //description:"Display build date of copernicus"
 	DataDir   string `default:"data"`
+	Reindex   bool
 
 	// Service struct {
 	// 	Address string `default:"1.0.0.1:80"`
@@ -173,7 +98,7 @@ type Configuration struct {
 		LimitAncestorSize    int   // Default for -limitancestorsize, maximum kilobytes of tx + all in-mempool ancestors
 		LimitDescendantCount int   // Default for -limitdescendantcount, max number of in-mempool descendants
 		LimitDescendantSize  int   // Default for -limitdescendantsize, maximum kilobytes of in-mempool descendants
-		MaxPoolSize          int   // Default for MaxPoolSize, maximum megabytes of mempool memory usage
+		MaxPoolSize          int64 `default:"300000000"` // Default for MaxPoolSize, maximum megabytes of mempool memory usage
 		MaxPoolExpiry        int   // Default for -mempoolexpiry, expiration time for mempool transactions in hours
 	}
 	P2PNet struct {
@@ -183,9 +108,11 @@ type Configuration struct {
 		ConnectPeersOnStart []string
 		DisableBanning      bool `default:"true"`
 		BanThreshold        uint32
-		SimNet              bool          `default:"false"`
+		TestNet             bool
+		RegTest             bool `default:"false"`
+		SimNet              bool
 		DisableListen       bool          `default:"true"`
-		BlocksOnly          bool          `default:"true"` //Do not accept transactions from remote peers.
+		BlocksOnly          bool          `default:"false"` //Do not accept transactions from remote peers.
 		BanDuration         time.Duration // How long to ban misbehaving peers
 		Proxy               string        // Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)
 		UserAgentComments   []string      // Comment to add to the user agent -- See BIP 14 for more information.
@@ -196,31 +123,210 @@ type Configuration struct {
 		NoOnion             bool     `default:"true"`  // Disable connecting to tor hidden services
 		Upnp                bool     `default:"false"` // Use UPnP to map our listening port outside of NAT
 		ExternalIPs         []string // Add an ip to the list of local addresses we claim to listen on to peers
-		AddCheckpoints      []model.Checkpoint
+		//AddCheckpoints      []model.Checkpoint
 	}
 	AddrMgr struct {
 		SimNet       bool
 		ConnectPeers []string
 	}
-	Protocal struct {
+	Protocol struct {
 		NoPeerBloomFilters bool `default:"true"`
 		DisableCheckpoints bool `default:"true"`
 	}
 	Script struct {
 		AcceptDataCarrier   bool `default:"true"`
-		MaxDatacarrierBytes uint `default:"83"`
+		MaxDatacarrierBytes uint `default:"223"`
 		IsBareMultiSigStd   bool `default:"true"`
 		//use promiscuousMempoolFlags to make more or less check of script, the type of value is uint
-		PromiscuousMempoolFlags string
+		PromiscuousMempoolFlags string `default:"0"`
+		Par                     int    `default:"32"`
 	}
 	TxOut struct {
 		DustRelayFee int64 `default:"83"`
+	}
+	Chain struct {
+		AssumeValid         string
+		UtxoHashStartHeight int32 `default:"-1"`
+		UtxoHashEndHeight   int32 `default:"-1"`
 	}
 	Mining struct {
 		BlockMinTxFee int64  // default DefaultBlockMinTxFee
 		BlockMaxSize  uint64 // default DefaultMaxGeneratedBlockSize
 		BlockVersion  int32  `default:"-1"`
 		Strategy      string `default:"ancestorfeerate"` // option:ancestorfee/ancestorfeerate
+	}
+	PProf struct {
+		IP   string `default:"localhost"`
+		Port string `default:"6060"`
+	}
+	BlockIndex struct {
+		CheckBlockIndex bool
+	}
+}
+
+var (
+	Cfg     *Configuration
+	DataDir string
+)
+
+// InitConfig init configuration
+func InitConfig(args []string) *Configuration {
+	// parse command line parameter to set program datadir
+	defaultDataDir := AppDataDir(defaultDataDirname, false)
+	DataDir = defaultDataDir
+
+	opts, err := InitArgs(args)
+	if err != nil {
+		//fmt.Println("\033[0;31mparse cmd line fail: %v\033[0m\n")
+		return nil
+	}
+	if opts.RegTest && opts.TestNet {
+		panic("Both testnet and regtest are true")
+	}
+
+	if len(opts.DataDir) > 0 {
+		DataDir = opts.DataDir
+	}
+
+	if opts.TestNet {
+		DataDir = path.Join(DataDir, "testnet")
+	} else if opts.RegTest {
+		DataDir = path.Join(DataDir, "regtest")
+	}
+
+	if !ExistDataDir(DataDir) {
+		err := os.MkdirAll(DataDir, os.ModePerm)
+		if err != nil {
+			panic("datadir create failed: " + err.Error())
+		}
+
+		// get GOPATH environment and copy conf file to dst dir
+		gopath := os.Getenv("GOPATH")
+		if gopath != "" {
+			// first try
+			projectPath := gopath + "/src/" + defaultProjectDir
+			filePath := projectPath + "/conf/" + defaultConfigFilename
+			_, err = os.Stat(filePath)
+			if !os.IsNotExist(err) {
+				_, err := CopyFile(filePath, DataDir+"/"+defaultConfigFilename)
+
+				if err != nil {
+					panic("from src/defaultProjectDir copy conf.yml failed.")
+				}
+			} else {
+				// second try
+				projectPath = gopath + "/src/copernicus"
+				filePath = projectPath + "/conf/" + defaultConfigFilename
+				_, err := CopyFile(filePath, DataDir+"/"+defaultConfigFilename)
+				if err != nil {
+					panic(" from src/copernicus copy conf.yml failed.")
+				}
+			}
+		}
+	}
+
+	config := &Configuration{}
+	viper.SetConfigType("yaml")
+
+	//parse struct tag
+	c := Configuration{}
+	t := reflect.TypeOf(c)
+	v := reflect.ValueOf(c)
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if v.Field(i).Type().Kind() != reflect.Struct {
+			key := field.Name
+			value, ok := field.Tag.Lookup(tagName)
+			if !ok {
+				continue
+			}
+			//set default value
+			viper.SetDefault(key, value)
+			//log.Printf("key is: %v,value is: %v\n", key, value)
+		} else {
+			structField := v.Field(i).Type()
+			structName := t.Field(i).Name
+			for j := 0; j < structField.NumField(); j++ {
+				fieldName := structField.Field(j).Name
+				key := fmt.Sprintf("%s.%s", structName, fieldName)
+				values, ok := structField.Field(j).Tag.Lookup(tagName)
+				if !ok {
+					continue
+				}
+				viper.SetDefault(key, values)
+				//log.Printf("key is: %v,value is: %v\n", key, values)
+			}
+			continue
+		}
+	}
+
+	// parse config
+	file := must(os.Open(DataDir + "/conf.yml")).(*os.File)
+	defer file.Close()
+	must(nil, viper.ReadConfig(file))
+	must(nil, viper.Unmarshal(config))
+
+	// set data dir
+	config.DataDir = DataDir
+	config.Reindex = opts.Reindex
+
+	config.RPC.RPCKey = filepath.Join(defaultDataDir, "rpc.key")
+	config.RPC.RPCCert = filepath.Join(defaultDataDir, "rpc.cert")
+
+	if opts.RegTest {
+		config.P2PNet.RegTest = true
+		if !viper.IsSet("BlockIndex.CheckBlockIndex") {
+			config.BlockIndex.CheckBlockIndex = true
+		}
+	}
+	if opts.TestNet {
+		config.P2PNet.TestNet = true
+	}
+
+	if opts.UtxoHashStartHeigh >= 0 && opts.UtxoHashEndHeigh <= opts.UtxoHashStartHeigh {
+		panic("utxohashstartheight should less than utxohashendheight")
+	}
+
+	if opts.UtxoHashStartHeigh >= 0 {
+		config.Chain.UtxoHashStartHeight = opts.UtxoHashStartHeigh
+		config.Chain.UtxoHashEndHeight = opts.UtxoHashEndHeigh
+	}
+
+	if len(opts.Whitelists) > 0 {
+		initWhitelists(config, opts)
+	}
+
+	return config
+}
+
+func initWhitelists(config *Configuration, opts *Opts) {
+	var ip net.IP
+	config.P2PNet.Whitelists = make([]*net.IPNet, 0, len(opts.Whitelists))
+	for _, addr := range opts.Whitelists {
+		_, ipnet, err := net.ParseCIDR(addr)
+
+		if err != nil {
+			ip = net.ParseIP(addr)
+			if ip == nil {
+				fmt.Fprintln(os.Stderr, fmt.Sprintf("[Error]The whitelist value of '%s' is invalid", addr))
+				continue
+			}
+
+			var bits int
+			if ip.To4() == nil {
+				// IPv6
+				bits = 128
+			} else {
+				bits = 32
+			}
+
+			ipnet = &net.IPNet{
+				IP:   ip,
+				Mask: net.CIDRMask(bits, bits),
+			}
+		}
+		config.P2PNet.Whitelists = append(config.P2PNet.Whitelists, ipnet)
 	}
 }
 
@@ -229,22 +335,6 @@ func must(i interface{}, err error) interface{} {
 		panic(err)
 	}
 	return i
-}
-
-func init() {
-	Cfg = initConfig()
-}
-
-func ExistDataDir(datadir string) bool {
-	_, err := os.Stat(datadir)
-	if err == nil {
-		return true
-	}
-	if os.IsExist(err) {
-		return false
-	}
-
-	return false
 }
 
 func CopyFile(src, des string) (w int64, err error) {
@@ -265,8 +355,33 @@ func CopyFile(src, des string) (w int64, err error) {
 
 // Validate validates configuration
 func (c Configuration) Validate() error {
-	//validate := validator.New(&validator.Config{TagName: "validate"})
 	validate := validator.New(&validator.Config{TagName: "validate"})
 	return validate.Struct(c)
 }
 
+func ExistDataDir(datadir string) bool {
+	_, err := os.Stat(datadir)
+	if err != nil && os.IsNotExist(err) {
+		return false
+	}
+
+	return true
+}
+
+func SetUnitTestDataDir(config *Configuration) (dirPath string, err error) {
+	oldDirParent := filepath.Dir(DataDir)
+	testDataDir, err := ioutil.TempDir(oldDirParent, "unitTestDataDir")
+	if err != nil {
+		return "", errors.New("test data directory create failed: " + err.Error())
+	}
+
+	_, err = CopyFile(filepath.Join(DataDir, defaultConfigFilename), filepath.Join(testDataDir, defaultConfigFilename))
+	if err != nil {
+		return "", err
+	}
+
+	DataDir = testDataDir
+	config.DataDir = testDataDir
+
+	return testDataDir, nil
+}

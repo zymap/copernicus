@@ -1,7 +1,7 @@
 package consensus
 
 const (
-	//OneMegabyte  1MB
+	//OneMegaByte  1MB
 	OneMegaByte = 1000000
 
 	//MaxTxSize  The maximum allowed size for a transaction, in bytes
@@ -11,7 +11,7 @@ const (
 	LegacyMaxBlockSize = OneMegaByte
 
 	//DefaultMaxBlockSize  Default setting for maximum allowed size for a block, in bytes
-	DefaultMaxBlockSize = 8 * OneMegaByte
+	DefaultMaxBlockSize = 32 * OneMegaByte
 	MinTxSize           = 62
 	MaxTxCount          = DefaultMaxBlockSize / MinTxSize
 	/*MaxBlockSigopsPerMb  The maximum allowed number of signature check operations per MB in a block
@@ -21,8 +21,8 @@ const (
 	/*MaxTxSigOpsCount allowed number of signature check operations per transaction. */
 	MaxTxSigOpsCount = 20000
 
-	/** Coinbase transaction outputs can only be spent after this number of new
-	 * blocks (network rule) */
+	// CoinbaseMaturity means Coinbase transaction outputs can only be spent after this number of new
+	// blocks (network rule)
 	CoinbaseMaturity = 100
 )
 

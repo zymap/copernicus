@@ -2,80 +2,226 @@ package utxo
 
 import (
 	"fmt"
-	"testing"
-	
+	"github.com/copernet/copernicus/conf"
+	"github.com/copernet/copernicus/model/opcodes"
+	"github.com/copernet/copernicus/model/outpoint"
+	"github.com/copernet/copernicus/model/script"
+	"github.com/copernet/copernicus/model/txout"
 	"github.com/copernet/copernicus/persist/db"
-	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/copernet/copernicus/util"
+	"github.com/stretchr/testify/assert"
+	"os"
+	"testing"
 )
 
-func TestMain(m *testing.M){
-	config := UtxoConfig{Do: &db.DBOption{CacheSize: 10000}}
-	InitUtxoLruTip(&config)
-	m.Run()
+func TestGetBestBlock(t *testing.T) {
+	conf.Cfg = conf.InitConfig([]string{})
+	testDataDir, err := conf.SetUnitTestDataDir(conf.Cfg)
+	if err != nil {
+		fmt.Print("init test directory failed")
+		os.Exit(1)
+	}
+	defer os.RemoveAll(testDataDir)
+	uc := &UtxoConfig{Do: &db.DBOption{
+		FilePath:  conf.Cfg.DataDir,
+		CacheSize: 1 << 20,
+	}}
+	InitUtxoLruTip(uc)
+
+	rhash, err := GetUtxoCacheInstance().GetBestBlock()
+	assert.EqualError(t, err, "leveldb: not found")
+	assert.Equal(t, util.Hash{}, rhash)
+
+	necm := NewEmptyCoinsMap()
+	hash1 := util.HashFromString("000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a6")
+	outpoint1 := outpoint.OutPoint{Hash: *hash1, Index: 0}
+
+	script1 := script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL})
+	txout1 := txout.NewTxOut(3, script1)
+
+	coin1 := &Coin{
+		txOut:         *txout1,
+		height:        10000,
+		isCoinBase:    false,
+		isMempoolCoin: false,
+		dirty:         false,
+		fresh:         false,
+	}
+
+	necm.AddCoin(&outpoint1, coin1, true)
+
+	err = GetUtxoCacheInstance().UpdateCoins(necm, hash1)
+	assert.Nil(t, err, "update coins failed")
+	ok := GetUtxoCacheInstance().Flush()
+	assert.True(t, ok)
+
+	rhash, err = GetUtxoCacheInstance().GetBestBlock()
+	t.Logf("best block: %s", rhash.String())
+	assert.Nil(t, err)
+	assert.NotEqual(t, util.Hash{}, rhash)
 }
-// func TestNewCoinsLruCache(t *testing.T) {
-//
-// 	coinsmap := NewEmptyCoinsMap()
-// 	coin := NewEmptyCoin()
-// 	coin.isCoinBase = true
-// 	coin.height = 100
-// 	h := util.HashZero
-// 	op := outpoint.NewOutPoint(h, 0)
-// 	coinsmap.AddCoin(op, coin)
-// 	utxoLruTip.UpdateCoins(coinsmap, &util.HashZero)
-// 	utxoLruTip.Flush()
-// 	c := utxoLruTip.GetCoin(op)
-// 	fmt.Println("c==TestNewCoinsLruCache=====%#v", c)
-// }
-//
-// func TestCoinsLruCache_GetCoin(t *testing.T) {
-// 	h := util.HashZero
-// 	op := outpoint.NewOutPoint(h, 0)
-// 	c := utxoLruTip.GetCoin(op)
-// 	fmt.Println("c===TestCoinsLruCache_GetCoin====%#v", c)
-// }
 
+func TestLRUCache(t *testing.T) {
 
-func TestCoinsDB_BatchWrite(t *testing.T) {
-	// d := utxoLruTip.(*CoinsLruCache).db
-	// batch := db.NewBatchWrapper(d.dbw)
-	// tk := []byte("aaaaaaaaaa")
-	// tv := []byte("bbbbbbbbbb")
-	// batch.Write(tk, tv)
-	// err := d.dbw.WriteBatch(batch, true)
-	// fmt.Println(err)
-	// v, e := d.dbw.Read(tv)
-	// fmt.Println(v,e)
-	// tk1 := []byte("cccccccccc")
-	// tv1 := []byte("dddddddddd")
-	// e = d.dbw.Write(tk1,tv1, true)
-	// fmt.Println(e)
-	// v1, e1 := d.dbw.Read(tv1)
-	// fmt.Println(v1,e1)
-	
-	//
-	ldb,_ := leveldb.OpenFile("/tmp/db", nil)
-	// tk2 := []byte("ffffffffff")
-	// tv2 := []byte("ffffffffff")
-	// data, e2:= ldb.Get(tk2,nil)
-	// fmt.Println(data,e2)
-	// ldb.Put(tk2, tv2, nil)
-	// data, e2 = ldb.Get(tk2,nil)
-	// fmt.Println(data,e2)
-	
-	
-	
-	bat := new(leveldb.Batch)
-	tk3 := []byte("g")
-	tv3 := []byte("g")
-	tk4 := []byte("h")
-	d3,e3 := ldb.Get(tk3, nil)
-	d4,e4 := ldb.Get(tk4, nil)
-	fmt.Println(d3,d4,e3,e4)
-	bat.Put(tk3,tv3)
-	bat.Put(tk4,tv3)
-	ldb.Write(bat, nil)
-	d3,e3 = ldb.Get(tk3, nil)
-	d4,e4 = ldb.Get(tk4, nil)
-	fmt.Println(d3,d4,e3,e4)
+	conf.Cfg = conf.InitConfig([]string{})
+	testDataDir, err := conf.SetUnitTestDataDir(conf.Cfg)
+	if err != nil {
+		fmt.Print("init test directory failed")
+		os.Exit(1)
+	}
+	defer os.RemoveAll(testDataDir)
+	uc := &UtxoConfig{Do: &db.DBOption{
+		FilePath:  conf.Cfg.DataDir,
+		CacheSize: 1 << 20,
+	}}
+	InitUtxoLruTip(uc)
+
+	necm := NewEmptyCoinsMap()
+	hash1 := util.HashFromString("000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a6")
+	outpoint1 := outpoint.OutPoint{Hash: *hash1, Index: 0}
+
+	script1 := script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL})
+	txout1 := txout.NewTxOut(3, script1)
+
+	coin1 := &Coin{
+		txOut:         *txout1,
+		height:        10000,
+		isCoinBase:    false,
+		isMempoolCoin: false,
+		dirty:         false,
+		fresh:         false,
+	}
+
+	necm.AddCoin(&outpoint1, coin1, true)
+
+	err = GetUtxoCacheInstance().UpdateCoins(necm, hash1)
+	assert.Nil(t, err, "update coins failed")
+
+	b := utxoTip.Flush()
+	assert.True(t, b, "flush error, the coin not flush to db..")
+
+	c := utxoTip.GetCoin(&outpoint1)
+	if c == nil {
+		t.Error("get coin faild...")
+	}
+
+	hv := utxoTip.HaveCoin(&outpoint1)
+	if !hv {
+		t.Error("the cache not have coin, please check...")
+	}
+}
+
+func TestUpdateCoins(t *testing.T) {
+
+	conf.Cfg = conf.InitConfig([]string{})
+	testDataDir, err := conf.SetUnitTestDataDir(conf.Cfg)
+	if err != nil {
+		fmt.Print("init test directory failed")
+		os.Exit(1)
+	}
+	defer os.RemoveAll(testDataDir)
+	uc := &UtxoConfig{Do: &db.DBOption{
+		FilePath:  conf.Cfg.DataDir,
+		CacheSize: 1 << 20,
+	}}
+	InitUtxoLruTip(uc)
+
+	necm := NewEmptyCoinsMap()
+	hash := util.HashFromString("000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0b7")
+	outPoint := outpoint.OutPoint{Hash: *hash, Index: 0}
+
+	scriptRaw := script.NewScriptRaw([]byte{opcodes.OP_12, opcodes.OP_EQUAL})
+	txouts := txout.NewTxOut(3, scriptRaw)
+
+	ncoin := &Coin{
+		txOut:         *txouts,
+		height:        1 << 20,
+		isCoinBase:    false,
+		isMempoolCoin: false,
+		dirty:         false,
+		fresh:         false,
+	}
+
+	necm.AddCoin(&outPoint, ncoin, true)
+
+	err = GetUtxoCacheInstance().UpdateCoins(necm, hash)
+	assert.Nil(t, err, "flush failed!")
+
+	c2 := utxoTip.GetCoin(&outPoint)
+	assert.NotNil(t, c2, "get coin failed!")
+
+	clc, ok := utxoTip.(*CoinsLruCache)
+	assert.True(t, ok, "type assertion failed!")
+
+	ncoin.dirty = false
+	ncoin.fresh = false
+	clc.UnCache(&outPoint)
+
+	hv2 := utxoTip.HaveCoin(&outPoint)
+	assert.False(t, hv2, "the cache should not have coin, please check!")
+
+	coinCopy := ncoin.DeepCopy()
+	coinCopy.dirty = true
+	necm.AddCoin(&outPoint, coinCopy, true)
+	err = GetUtxoCacheInstance().UpdateCoins(necm, hash)
+	assert.Nil(t, err, "update copy coin failed")
+
+	coinCopy2 := coinCopy.DeepCopy()
+	necm.AddCoin(&outPoint, coinCopy2, true)
+	coinCopy2.Clear()
+	coinCopy2.fresh = true
+	err = GetUtxoCacheInstance().UpdateCoins(necm, hash)
+	assert.Nil(t, err, "update copy coin failed")
+
+	//------
+	necm.UnCache(&outPoint)
+	coinCopy3 := ncoin.DeepCopy()
+	necm.AddCoin(&outPoint, coinCopy3, true)
+	coinCopy3.fresh = true
+	coinCopy3.dirty = true
+	err = GetUtxoCacheInstance().UpdateCoins(necm, hash)
+	assert.Nil(t, err, "update copy coin failed")
+}
+
+func TestUpdateCoins2(t *testing.T) {
+
+	conf.Cfg = conf.InitConfig([]string{})
+	testDataDir, err := conf.SetUnitTestDataDir(conf.Cfg)
+	if err != nil {
+		fmt.Print("init test directory failed")
+		os.Exit(1)
+	}
+	defer os.RemoveAll(testDataDir)
+	uc := &UtxoConfig{Do: &db.DBOption{
+		FilePath:  conf.Cfg.DataDir,
+		CacheSize: 1 << 20,
+	}}
+	InitUtxoLruTip(uc)
+
+	necm := NewEmptyCoinsMap()
+	hash := util.HashFromString("000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0b7")
+	outPoint := outpoint.OutPoint{Hash: *hash, Index: 0}
+
+	scriptRaw := script.NewScriptRaw([]byte{opcodes.OP_12, opcodes.OP_EQUAL})
+	txouts := txout.NewTxOut(3, scriptRaw)
+
+	ncoin := &Coin{
+		txOut:         *txouts,
+		height:        1 << 20,
+		isCoinBase:    false,
+		isMempoolCoin: false,
+		dirty:         false,
+		fresh:         false,
+	}
+
+	necm.AddCoin(&outPoint, ncoin, true)
+	err = GetUtxoCacheInstance().UpdateCoins(necm, hash)
+	assert.Nil(t, err, "flush failed!")
+
+	newCoin := ncoin.DeepCopy()
+	necm.AddCoin(&outPoint, newCoin, true)
+	newCoin.dirty = true
+	newCoin.fresh = true
+	err = GetUtxoCacheInstance().UpdateCoins(necm, hash)
+	assert.Nil(t, err, "flush failed!")
 }

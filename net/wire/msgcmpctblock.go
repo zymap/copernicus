@@ -78,10 +78,8 @@ func (pft *PreFilledTransaction) Decode(r io.Reader, pver uint32, enc MessageEnc
 		return messageError("MsgCmpctBlock.Decode", fmt.Sprintf("index overflowed 16-bits"))
 	}
 	pft.Index = uint16(idx)
-	if err := pft.Tx.Decode(r, pver, enc); err != nil {
-		return err
-	}
-	return nil
+	err = pft.Tx.Decode(r, pver, enc)
+	return err
 }
 
 func (pft *PreFilledTransaction) Encode(w io.Writer, pver uint32, enc MessageEncoding) error {
@@ -158,8 +156,8 @@ func (msg *MsgCmpctBlock) Encode(w io.Writer, pver uint32, enc MessageEncoding) 
 		return err
 	}
 	for i := 0; i < len(msg.ShortTxids); i++ {
-		lsb := uint32(0)
-		msb := uint16(0)
+		var lsb uint32
+		var msb uint16
 		lsb = uint32(msg.ShortTxids[i] & 0xffffffff)
 		msb = uint16((msg.ShortTxids[i] >> 32) & 0xffff)
 		if err := util.WriteElements(w, lsb); err != nil {
@@ -181,6 +179,6 @@ func (msg *MsgCmpctBlock) Command() string {
 	return CmdCmpctBlock
 }
 
-func (msg *MsgCmpctBlock) MaxPayloadLength(pver uint32) uint32 {
-	return uint32(80 + 8 + 3 + len(msg.ShortTxids)*6 + 3 + len(msg.PreFilledTxn)*(3+MaxBlockPayload))
+func (msg *MsgCmpctBlock) MaxPayloadLength(pver uint32) uint64 {
+	return 80 + 8 + 3 + uint64(len(msg.ShortTxids))*6 + 3 + uint64(len(msg.PreFilledTxn))*(3+MaxBlockPayload)
 }

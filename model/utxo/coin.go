@@ -3,7 +3,7 @@ package utxo
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
+	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/model/script"
 	"github.com/copernet/copernicus/model/txout"
 	"github.com/copernet/copernicus/util"
@@ -32,9 +32,8 @@ func (coin *Coin) IsMempoolCoin() bool {
 	return coin.isMempoolCoin
 }
 
-// todo check coinbase height，lock time？
 func (coin *Coin) IsSpendable() bool {
-	return coin.txOut.IsNull()
+	return coin.txOut.IsSpendable()
 }
 
 func (coin *Coin) IsSpent() bool {
@@ -57,16 +56,18 @@ func (coin *Coin) GetScriptPubKey() *script.Script {
 }
 
 func (coin *Coin) GetAmount() amount.Amount {
-	return amount.Amount(coin.txOut.GetValue())
+	return coin.txOut.GetValue()
 }
 
 func (coin *Coin) DeepCopy() *Coin {
 	newCoin := Coin{height: coin.height, isCoinBase: coin.isCoinBase, dirty: coin.dirty, fresh: coin.fresh, isMempoolCoin: coin.isMempoolCoin}
 	outScript := coin.txOut.GetScriptPubKey()
-	newOutScript := script.NewScriptRaw(outScript.GetData())
-	newOutScript.ParsedOpCodes = outScript.ParsedOpCodes
-	newOut := txout.NewTxOut(coin.txOut.GetValue(), newOutScript)
-	newCoin.txOut = *newOut
+	if coin.txOut.GetScriptPubKey() != nil {
+		newOutScript := script.NewScriptRaw(outScript.GetData())
+		//newOutScript.ParsedOpCodes = outScript.ParsedOpCodes
+		newOut := txout.NewTxOut(coin.txOut.GetValue(), newOutScript)
+		newCoin.txOut = *newOut
+	}
 	return &newCoin
 }
 
@@ -76,6 +77,7 @@ func (coin *Coin) DynamicMemoryUsage() int64 {
 
 func (coin *Coin) Serialize(w io.Writer) error {
 	if coin.IsSpent() {
+		log.Debug("already spent")
 		return errors.New("already spent")
 	}
 	var bit int32
@@ -86,14 +88,15 @@ func (coin *Coin) Serialize(w io.Writer) error {
 	if err := util.WriteVarLenInt(w, uint64(heightAndIsCoinBase)); err != nil {
 		return err
 	}
-	tc := coin.txOut
+	tc := txout.NewTxoutCompressor(&coin.txOut)
 	return tc.Serialize(w)
 }
 
 func (coin *Coin) Unserialize(r io.Reader) error {
-
+	//hicb means heightAndIsCoinBase
 	hicb, err := util.ReadVarLenInt(r)
 	if err != nil {
+		log.Error("Coin UnSerialize: the read count is: %d, error: %v", hicb, err)
 		return err
 	}
 	heightAndIsCoinBase := int32(hicb)
@@ -101,12 +104,11 @@ func (coin *Coin) Unserialize(r io.Reader) error {
 	if (heightAndIsCoinBase & 1) == 1 {
 		coin.isCoinBase = true
 	}
-	fmt.Println("coin.Unserialize=====", err, coin.height, coin.isCoinBase)
-	err = coin.txOut.Unserialize(r)
-	return err
+	tc := txout.NewTxoutCompressor(&coin.txOut)
+	return tc.Unserialize(r)
 }
 
-//new an confirmed coin
+// NewCoin creates an confirmed coin
 func NewCoin(out *txout.TxOut, height int32, isCoinBase bool) *Coin {
 
 	return &Coin{
@@ -116,7 +118,7 @@ func NewCoin(out *txout.TxOut, height int32, isCoinBase bool) *Coin {
 	}
 }
 
-//new an unconfirmed coin for mempool
+// NewMempoolCoin creates an unconfirmed coin for mempool
 func NewMempoolCoin(out *txout.TxOut) *Coin {
 	return &Coin{
 		txOut:         *out,

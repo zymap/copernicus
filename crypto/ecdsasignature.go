@@ -1,8 +1,11 @@
 package crypto
 
 import (
+	"encoding/hex"
 	"github.com/copernet/copernicus/errcode"
+	"github.com/copernet/copernicus/log"
 	"github.com/copernet/secp256k1-go/secp256k1"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -12,7 +15,7 @@ const (
 	SigHashForkID       = 0x40
 	SigHashAnyoneCanpay = 0x80
 
-	// sigHashMask defines the number of bits of the hash type which is used
+	// SigHashMask defines the number of bits of the hash type which is used
 	// to identify which outputs are signed.
 	SigHashMask = 0x1f
 )
@@ -34,21 +37,20 @@ func (sig *Signature) Verify(hash []byte, pubKey *PublicKey) bool {
 	return correct == 1
 }
 
+func (sig *Signature) EcdsaNormalize() bool {
+	_, err := secp256k1.EcdsaSignatureNormalize(secp256k1Context, sig.toLibEcdsaSignature(), sig.toLibEcdsaSignature())
+	return err == nil
+}
+
 func ParseDERSignature(signature []byte) (*Signature, error) {
-	_, sig, err := secp256k1.EcdsaSignatureParseDer(secp256k1Context, signature)
-	if err != nil {
+	if secp256k1Context == nil {
+		return nil, errors.New("secp256k1Context is nil")
+	}
+	ret, sig, err := secp256k1.EcdsaSignatureParseDerLax(secp256k1Context, signature)
+	if ret != 1 || err != nil {
 		return nil, err
 	}
 	return (*Signature)(sig), nil
-}
-
-func (sig *Signature)EcdsaNormalize() bool {
-	ret, err := secp256k1.EcdsaSignatureNormalize(secp256k1Context, sig.toLibEcdsaSignature(), sig.toLibEcdsaSignature())
-	if ret != 1 || err != nil {
-		return false
-	}
-
-	return true
 }
 
 func IsLowDERSignature(vchSig []byte) (bool, error) {
@@ -56,7 +58,7 @@ func IsLowDERSignature(vchSig []byte) (bool, error) {
 		return false, errcode.New(errcode.ScriptErrSigDer)
 	}
 	var vchCopy []byte
-	vchCopy = append(vchCopy, vchSig[:]...)
+	vchCopy = append(vchCopy, vchSig[:len(vchSig)-1]...)
 	ret := checkLowS(vchCopy)
 	if !ret {
 		return false, errcode.New(errcode.ScriptErrSigHighs)
@@ -66,15 +68,16 @@ func IsLowDERSignature(vchSig []byte) (bool, error) {
 }
 
 func checkLowS(vchSig []byte) bool {
-	ret, sig, err := secp256k1.EcdsaSignatureParseCompact(secp256k1Context, vchSig)
-	if ret != 1 || err != nil {
+	sig, err := ParseDERSignature(vchSig)
+	if err != nil {
+		log.Debug("ParseDERSignature failed, sig:%s", hex.EncodeToString(vchSig))
 		return false
 	}
-	ret, err = secp256k1.EcdsaSignatureNormalize(secp256k1Context, nil, sig)
-	if ret != 1 || err != nil {
+	ret, err := secp256k1.EcdsaSignatureNormalize(secp256k1Context, nil, sig.toLibEcdsaSignature())
+	if ret != 0 || err != nil {
+		log.Debug("EcdsaSignatureNormalize failed, sig:%s", hex.EncodeToString(vchSig))
 		return false
 	}
-
 	return true
 }
 
@@ -154,32 +157,9 @@ func IsDefineHashtypeSignature(vchSig []byte) bool {
 	if len(vchSig) == 0 {
 		return false
 	}
-	nHashType := vchSig[len(vchSig)-1] & (^byte(SigHashAnyoneCanpay))
+	nHashType := vchSig[len(vchSig)-1] & (^byte(SigHashAnyoneCanpay | SigHashForkID))
 	if nHashType < SigHashAll || nHashType > SigHashSingle {
 		return false
 	}
 	return true
 }
-
-//func ParseSignature(signature []byte) (*Signature, error) {
-//	_, sig, err := secp256k1.EcdsaSignatureParseCompact(secp256k1Context, signature)
-//	if err != nil {
-//		return nil, err
-//	}
-//	return (*Signature)(sig), nil
-//}
-//func GetHashType(chSig []byte) uint32 {
-//	if len(chSig) == 0 {
-//		return 0
-//	}
-//	return uint32(chSig[len(chSig)-1])
-//
-//}
-//func Sign(privKey *PrivateKey, hash []byte) ([]byte, error) {
-//	_, signature, err := secp256k1.EcdsaSign(secp256k1Context, hash, privKey.bytes)
-//	if err != nil {
-//		return nil, err
-//	}
-//	_, ret, _ := secp256k1.EcdsaSignatureSerializeDer(secp256k1Context, signature)
-//	return ret, nil
-//}

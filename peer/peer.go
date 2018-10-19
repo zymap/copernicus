@@ -9,6 +9,8 @@ import (
 	"container/list"
 	"errors"
 	"fmt"
+	"github.com/copernet/copernicus/errcode"
+	"github.com/copernet/copernicus/net/socks"
 	"io"
 	"math/rand"
 	"net"
@@ -18,11 +20,10 @@ import (
 	"time"
 
 	"github.com/copernet/copernicus/log"
+	"github.com/copernet/copernicus/model"
 	"github.com/copernet/copernicus/model/chain"
-	"github.com/copernet/copernicus/model/chainparams"
 	"github.com/copernet/copernicus/net/wire"
 	"github.com/copernet/copernicus/util"
-	"github.com/btcsuite/go-socks/socks"
 	"github.com/davecgh/go-spew/spew"
 )
 
@@ -251,7 +252,7 @@ type Config struct {
 	// ChainParams identifies which chain parameters the peer is associated
 	// with.  It is highly recommended to specify this field, however it can
 	// be omitted in which case the test network will be used.
-	ChainParams *chainparams.BitcoinParams
+	ChainParams *model.BitcoinParams
 
 	// Services specifies which services to advertise as supported by the
 	// local peer.  This field can be omitted in which case it will be 0
@@ -379,6 +380,7 @@ type StatsSnap struct {
 	PingWait              float64
 	SyncedHeaders         int
 	SyncedBlocks          int
+	Inflight              []int
 	WhiteListed           bool
 	UsesCashMagic         bool
 	MapSendBytesPerMsgCmd map[string]uint64
@@ -474,15 +476,26 @@ type Peer struct {
 	lastPingTime       time.Time // Time we sent last ping.
 	lastPingMicros     int64     // Time for last ping to return.
 
-	stallControl  chan stallControlMsg
-	outputQueue   chan outMsg
-	sendQueue     chan outMsg
-	sendDoneQueue chan struct{}
-	outputInvChan chan *wire.InvVect
-	inQuit        chan struct{}
-	queueQuit     chan struct{}
-	outQuit       chan struct{}
-	quit          chan struct{}
+	stallControl      chan stallControlMsg
+	outputQueue       chan outMsg
+	sendQueue         chan outMsg
+	sendDoneQueue     chan struct{}
+	outputInvChan     chan *wire.InvVect
+	inQuit            chan struct{}
+	queueQuit         chan struct{}
+	outQuit           chan struct{}
+	quit              chan struct{}
+	requestingDataCnt uint64
+
+	reqMempoolOnce sync.Once
+}
+
+func (p *Peer) RequestMemPool() {
+	p.reqMempoolOnce.Do(func() {
+		if p.services&wire.SFNodeBloom == wire.SFNodeBloom {
+			p.QueueMessage(wire.NewMsgMemPool(), nil)
+		}
+	})
 }
 
 // String returns the peer's address and directionality as a human-readable
@@ -498,9 +511,11 @@ func (p *Peer) String() string {
 // This function is safe for concurrent access.
 func (p *Peer) UpdateLastBlockHeight(newHeight int32) {
 	p.statsMtx.Lock()
-	log.Trace("Updating last block height of peer %v from %v to %v",
-		p.addr, p.lastBlock, newHeight)
-	p.lastBlock = newHeight
+	if p.lastBlock < newHeight {
+		log.Trace("Updating last block height of peer %v from %v to %v",
+			p.addr, p.lastBlock, newHeight)
+		p.lastBlock = newHeight
+	}
 	p.statsMtx.Unlock()
 }
 
@@ -1032,7 +1047,7 @@ func (p *Peer) PushGetHeadersMsg(locator chain.BlockLocator, stopHash *util.Hash
 // function to block until the reject message has actually been sent.
 //
 // This function is safe for concurrent access.
-func (p *Peer) PushRejectMsg(command string, code wire.RejectCode, reason string, hash *util.Hash, wait bool) {
+func (p *Peer) PushRejectMsg(command string, code errcode.RejectCode, reason string, hash *util.Hash, wait bool) {
 	// Don't bother sending the reject message if the protocol version
 	// is too low.
 	if p.VersionKnown() && p.ProtocolVersion() < wire.RejectVersion {
@@ -1066,6 +1081,10 @@ func (p *Peer) PushRejectMsg(command string, code wire.RejectCode, reason string
 // from the remote peer.  It will return an error if the remote peer's version
 // is not compatible with ours.
 func (p *Peer) handleRemoteVersionMsg(msg *wire.MsgVersion) error {
+	//TODO: REJECT_DUPLICATE version message
+	//TODO: REJECT_NONSTANDARD services field
+	//TODO: REJECT_OBSOLETE versio < minAcceptableProtocolVersion
+
 	// Detect self connections.
 	if !allowSelfConns && sentNonces.Exists(msg.Nonce) {
 		return errors.New("disconnecting peer connected to self")
@@ -1168,7 +1187,7 @@ func (p *Peer) readMessage(encoding wire.MessageEncoding) (wire.Message, []byte,
 	var err error
 	defer func() {
 		if err != nil {
-			log.Error("readMessage got a error: %v", err)
+			log.Error("peer(%s): readMessage got a error: %v", p, err)
 		}
 	}()
 
@@ -1184,7 +1203,7 @@ func (p *Peer) readMessage(encoding wire.MessageEncoding) (wire.Message, []byte,
 
 	// Use closures to log expensive operations so they are only run when
 	// the logging level requires it.
-	log.Debug("%v", newLogClosure(func() string {
+	log.Debug("read message: %v", newLogClosure(func() string {
 		// Debug summary of message.
 		summary := messageSummary(msg)
 		if len(summary) > 0 {
@@ -1219,7 +1238,7 @@ func (p *Peer) writeMessage(msg wire.Message, enc wire.MessageEncoding) error {
 		return fmt.Sprintf("Sending %v%s to %s", msg.Command(),
 			summary, p)
 	}))
-	log.Trace("%v", newLogClosure(func() string {
+	log.Trace("write message to (%s) : %v", p.Addr(), newLogClosure(func() string {
 		return spew.Sdump(msg)
 	}))
 	//log.Trace("%v", newLogClosure(func() string {
@@ -1295,7 +1314,7 @@ func (p *Peer) shouldHandleReadError(err error) bool {
 
 // maybeAddDeadline potentially adds a deadline for the appropriate expected
 // response for the passed wire protocol command to the pending responses map.
-func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msgCmd string) {
+func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msg wire.Message) {
 	// Setup a deadline for each message being sent that expects a response.
 	//
 	// NOTE: Pings are intentionally ignored here since they are typically
@@ -1303,7 +1322,7 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msgCmd st
 	// such as is typical in the case of initial block download, the
 	// response won't be received in time.
 	deadline := time.Now().Add(stallResponseTimeout)
-	switch msgCmd {
+	switch msg.Command() {
 	case wire.CmdVersion:
 		// Expects a verack message.
 		pendingResponses[wire.CmdVerAck] = deadline
@@ -1318,6 +1337,7 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msgCmd st
 
 	case wire.CmdGetData:
 		// Expects a block, merkleblock, tx, or notfound message.
+		p.requestingDataCnt += uint64(len(msg.(*wire.MsgGetData).InvList))
 		pendingResponses[wire.CmdBlock] = deadline
 		pendingResponses[wire.CmdMerkleBlock] = deadline
 		pendingResponses[wire.CmdTx] = deadline
@@ -1366,7 +1386,7 @@ out:
 				// Add a deadline for the expected response
 				// message if needed.
 				p.maybeAddDeadline(pendingResponses,
-					msg.message.Command())
+					msg.message)
 
 			case sccReceiveMessage:
 				// Remove received messages from the expected
@@ -1379,8 +1399,20 @@ out:
 				case wire.CmdMerkleBlock:
 					fallthrough
 				case wire.CmdTx:
+					p.requestingDataCnt--
+					if p.requestingDataCnt > 0 {
+						deadline := time.Now().Add(stallResponseTimeout)
+						pendingResponses[wire.CmdBlock] = deadline
+						pendingResponses[wire.CmdMerkleBlock] = deadline
+						pendingResponses[wire.CmdTx] = deadline
+						pendingResponses[wire.CmdNotFound] = deadline
+						continue
+					}
 					fallthrough
 				case wire.CmdNotFound:
+					if msgCmd == wire.CmdNotFound {
+						p.requestingDataCnt = 0
+					}
 					delete(pendingResponses, wire.CmdBlock)
 					delete(pendingResponses, wire.CmdMerkleBlock)
 					delete(pendingResponses, wire.CmdTx)
@@ -1440,8 +1472,8 @@ out:
 				}
 
 				log.Debug("Peer %s appears to be stalled or "+
-					"misbehaving, %s timeout -- "+
-					"disconnecting", p, command)
+					"misbehaving, %s timeout (%d outstanding response for block/merkleblock/tx) -- "+
+					"disconnecting", p, command, p.requestingDataCnt)
 				p.Disconnect()
 				break
 			}
@@ -1523,11 +1555,12 @@ out:
 				// at least that much of the message was valid, but that is not
 				// currently exposed by wire, so just used malformed for the
 				// command.
-				p.PushRejectMsg("malformed", wire.RejectMalformed, errMsg, nil,
+				p.PushRejectMsg("malformed", errcode.RejectMalformed, errMsg, nil,
 					true)
 			}
 			break out
 		}
+		log.Info("Read message %T inHandle", rmsg)
 		atomic.StoreInt64(&p.lastRecv, time.Now().Unix())
 		p.stallControl <- stallControlMsg{sccReceiveMessage, rmsg}
 
@@ -1724,6 +1757,8 @@ out:
 			err := p.writeMessage(msg.msg, msg.encoding)
 			if err != nil {
 				p.Disconnect()
+				log.Error("Failed to send message to "+
+					"%s: %v", p, err)
 				if p.shouldLogWriteError(err) {
 					log.Error("Failed to send message to "+
 						"%s: %v", p, err)
@@ -1848,7 +1883,9 @@ func (p *Peer) QueueInventory(invVect *wire.InvVect) {
 
 // AssociateConnection associates the given conn to the peer.   Calling this
 // function when the peer is already connected will have no effect.
-func (p *Peer) AssociateConnection(conn net.Conn, phCh chan<- *PeerMessage) {
+func (p *Peer) AssociateConnection(conn net.Conn, phCh chan<- *PeerMessage,
+	newPeerCallback func(*Peer)) {
+
 	// Already connected?
 	if !atomic.CompareAndSwapInt32(&p.connected, 0, 1) {
 		return
@@ -1873,7 +1910,7 @@ func (p *Peer) AssociateConnection(conn net.Conn, phCh chan<- *PeerMessage) {
 	}
 
 	go func() {
-		if err := p.start(phCh); err != nil {
+		if err := p.start(phCh, newPeerCallback); err != nil {
 			log.Debug("Cannot start peer %v: %v", p, err)
 			p.Disconnect()
 		}
@@ -1904,10 +1941,10 @@ func (p *Peer) Disconnect() {
 }
 
 // start begins processing input and output messages.
-func (p *Peer) start(phCh chan<- *PeerMessage) error {
+func (p *Peer) start(phCh chan<- *PeerMessage, newPeerCallback func(*Peer)) error {
 	log.Trace("Starting peer %s", p)
 
-	negotiateErr := make(chan error)
+	negotiateErr := make(chan error, 1)
 	go func() {
 		if p.inbound {
 			negotiateErr <- p.negotiateInboundProtocol()
@@ -1927,10 +1964,10 @@ func (p *Peer) start(phCh chan<- *PeerMessage) error {
 		return errors.New("protocol negotiation timeout")
 	}
 	log.Debug("Connected to %s", p.Addr())
-
 	// Send our verack message now that the IO processing machinery has started.
 	p.QueueMessage(wire.NewMsgVerAck(), nil)
 
+	newPeerCallback(p)
 	// The protocol has been negotiated successfully so start processing input
 	// and output messages.
 	go p.stallHandler()
@@ -1965,7 +2002,7 @@ func (p *Peer) readRemoteVersionMsg() error {
 		errStr := "A version message must precede all others"
 		log.Error(errStr)
 
-		rejectMsg := wire.NewMsgReject(msg.Command(), wire.RejectMalformed,
+		rejectMsg := wire.NewMsgReject(msg.Command(), errcode.RejectMalformed,
 			errStr)
 		return p.writeMessage(rejectMsg, wire.LatestEncoding)
 	}
@@ -2025,7 +2062,7 @@ func newPeerBase(origCfg *Config, inbound bool) *Peer {
 
 	// Set the chain parameters to testnet if the caller did not specify any.
 	if cfg.ChainParams == nil {
-		cfg.ChainParams = chainparams.ActiveNetParams
+		cfg.ChainParams = model.ActiveNetParams
 	}
 
 	p := Peer{

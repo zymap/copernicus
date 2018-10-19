@@ -4,10 +4,12 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"github.com/copernet/copernicus/crypto"
 	"github.com/copernet/copernicus/util"
 )
 
 func TestPublicKeyToAddress(t *testing.T) {
+
 	publicKey := "03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd"
 	bytes, err := hex.DecodeString(publicKey)
 	if err != nil {
@@ -20,7 +22,7 @@ func TestPublicKeyToAddress(t *testing.T) {
 		return
 	}
 	hash160 := make([]byte, 20)
-	copy(hash160[:], address.hash160[:])
+	copy(hash160, address.hash160[:])
 	hash160Hex := hex.EncodeToString(hash160)
 	if hash160Hex != "9a1c78a507689f6f54b847ad1cef1e614ee23f1e" {
 		t.Errorf("hash160Hex is wrong 9a1c78a507689f6f54b847ad1cef1e614ee23f1e  --  %s", hash160Hex)
@@ -72,6 +74,7 @@ func TestHash160ToAddress(t *testing.T) {
 }
 
 func TestPrivateKeyToAddress(t *testing.T) {
+	crypto.InitSecp256()
 	address, err := AddressFromPrivateKey("5KYZdUEo39z3FPrtuX2QbbwGnNP5zTd7yyr2SC1j299sBCnWjss")
 	if err != nil {
 		t.Error(err)
@@ -106,4 +109,27 @@ func TestPrivateKeyFromHex(t *testing.T) {
 	//if err != nil {
 	//	t.Error(err.Error())
 	//}
+}
+
+func TestInitAddressParam(t *testing.T) {
+	InitAddressParam(&AddressParam{
+		PubKeyHashAddressVer: 11,
+		ScriptHashAddressVer: 96,
+	})
+	if AddressVerPubKey() != 11 {
+		t.Errorf("TestInitAddressParam test failed, pubKeyAddressVer(%v) not init", AddressVerPubKey())
+	}
+	if AddressVerScript() != 96 {
+		t.Errorf("TestInitAddressParam test failed, scriptAddressVer(%v) not init", AddressVerScript())
+	}
+	InitAddressParam(&AddressParam{
+		PubKeyHashAddressVer: PublicKeyToAddress,
+		ScriptHashAddressVer: ScriptToAddress,
+	})
+	if AddressVerPubKey() != PublicKeyToAddress {
+		t.Errorf("TestInitAddressParam test failed, pubKeyAddressVer(%v) not init", AddressVerPubKey())
+	}
+	if AddressVerScript() != ScriptToAddress {
+		t.Errorf("TestInitAddressParam test failed, scriptAddressVer(%v) not init", AddressVerScript())
+	}
 }

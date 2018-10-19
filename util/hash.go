@@ -6,13 +6,13 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"golang.org/x/crypto/ripemd160"
+
 	"hash"
 	"io"
 	"math/big"
 
-	"bytes"
-	"github.com/astaxie/beego/logs"
-	"golang.org/x/crypto/ripemd160"
+	"github.com/copernet/copernicus/log"
 )
 
 const (
@@ -44,22 +44,6 @@ func DoubleSha256Hash(b []byte) Hash {
 	return Hash(sha256.Sum256(first[:Hash256Size]))
 }
 
-func HexToHash(str string) Hash {
-	bytes := HexToBytes(str)
-	if bytes == nil {
-		return Hash{}
-	}
-	var hashBytes [Hash256Size]byte
-	copy(hashBytes[:], bytes[:Hash256Size])
-	return Hash(hashBytes)
-}
-
-// Calculate the hash of hasher over buf.
-func calcHash(buf []byte, hasher hash.Hash) []byte {
-	hasher.Write(buf)
-	return hasher.Sum(nil)
-}
-
 // Hash160 calculates the hash ripemd160(sha256(b)).
 func Hash160(buf []byte) []byte {
 	return calcHash(calcHash(buf, sha256.New()), ripemd160.New())
@@ -69,20 +53,22 @@ func Ripemd160(buf []byte) []byte {
 	return calcHash(buf, ripemd160.New())
 }
 
+// Calculate the hash of hasher over buf.
+func calcHash(buf []byte, hasher hash.Hash) []byte {
+	hasher.Write(buf)
+	return hasher.Sum(nil)
+}
+
 func Sha1(buf []byte) [20]byte {
 	return sha1.Sum(buf)
 }
 
-func (hash *Hash) String() string {
+func (hash Hash) String() string {
 	bytes := hash.GetCloneBytes()
 	for i := 0; i < Hash256Size/2; i++ {
 		bytes[i], bytes[Hash256Size-1-i] = bytes[Hash256Size-1-i], bytes[i]
 	}
-	return hex.EncodeToString(bytes[:])
-}
-
-func (hash *Hash) ToString() string {
-	return hash.String()
+	return hex.EncodeToString(bytes)
 }
 
 func (hash *Hash) SerializeSize() uint32 {
@@ -104,7 +90,7 @@ func (hash *Hash) EncodeSize() uint32 {
 func (hash *Hash) Encode(w io.Writer) (int, error) {
 	length, err := w.Write(hash[:])
 	if length != Hash256Size || err != nil {
-		logs.Alert("hash.Unserialize err: ", length, err)
+		log.Alert("hash.Unserialize err: ", length, err)
 		return length, err
 	}
 	return length, err
@@ -113,7 +99,7 @@ func (hash *Hash) Encode(w io.Writer) (int, error) {
 func (hash *Hash) Decode(r io.Reader) (int, error) {
 	length, err := io.ReadFull(r, hash[:])
 	if length != Hash256Size || err != nil {
-		logs.Alert("hash.Unserialize err: ", length, err)
+		log.Alert("hash.Unserialize err: ", length, err)
 		return length, err
 	}
 	return length, err
@@ -139,20 +125,15 @@ func (hash *Hash) Cmp(other *Hash) int {
 	}
 	return hash.ToBigInt().Cmp(other.ToBigInt())
 }
-func (hash *Hash) SetBytes(bytes []byte) error {
-	length := len(bytes)
-	if length != Hash256Size {
-		return fmt.Errorf("invalid hash length of %v , want %v", length, Hash256Size)
-	}
-	copy(hash[:], bytes)
-	return nil
-}
 
 func (hash *Hash) IsEqual(target *Hash) bool {
 	if hash == nil && target == nil {
 		return true
 	}
-	return bytes.Equal(hash[:], target[:])
+	if hash == nil || target == nil {
+		return false
+	}
+	return *hash == *target
 }
 
 func (hash *Hash) IsNull() bool {
@@ -164,27 +145,27 @@ func (hash *Hash) IsNull() bool {
 	return true
 }
 
-func BytesToHash(bytes []byte) (hash *Hash, err error) {
-	length := len(bytes)
-	if length != Hash256Size {
-		return nil, fmt.Errorf("invalid hash length of %v , want %v", length, Hash256Size)
+func HashFromString(hexString string) *Hash {
+	hash, err := GetHashFromStr(hexString)
+	if err != nil {
+		panic(err)
 	}
-	hash = new(Hash)
-	hash.SetBytes(bytes)
-	return
+	return hash
 }
 
 func GetHashFromStr(hashStr string) (hash *Hash, err error) {
 	hash = new(Hash)
-	bytes, err := DecodeHash(hashStr)
+	bytes, err := GetHashBytesFromStr(hashStr)
 	if err != nil {
 		return
 	}
-	hash.SetBytes(bytes)
+
+	copy(hash[:], bytes)
+
 	return
 }
 
-func DecodeHash(src string) (bytes []byte, err error) {
+func GetHashBytesFromStr(src string) (bytes []byte, err error) {
 	if len(src) > MaxHashStringSize {
 		return nil, fmt.Errorf("max hash string length is %v bytes", MaxHashStringSize)
 	}
@@ -207,21 +188,6 @@ func DecodeHash(src string) (bytes []byte, err error) {
 		bytes[i], bytes[Hash256Size-1-i] = reversedHash[Hash256Size-1-i], b
 	}
 	return
-}
-
-func CompareByHash(a, b interface{}) bool {
-	comA := a.(Hash)
-	comB := b.(Hash)
-	ret := comA.Cmp(&comB)
-	return ret > 0
-}
-
-func HashFromString(hexString string) *Hash {
-	hash, err := GetHashFromStr(hexString)
-	if err != nil {
-		panic(err)
-	}
-	return hash
 }
 
 func rotl(x uint64, b uint8) uint64 {

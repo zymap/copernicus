@@ -1,8 +1,6 @@
 package crypto
 
 import (
-	"fmt"
-
 	"github.com/copernet/copernicus/util/base58"
 	"github.com/copernet/secp256k1-go/secp256k1"
 	"github.com/pkg/errors"
@@ -19,20 +17,41 @@ const (
 	DumpedPrivateKeyVersion = 128
 )
 
+var activeNetPrivateKeyVer byte = DumpedPrivateKeyVersion
+
+func InitPrivateKeyVersion(privateKeyVer byte) {
+	activeNetPrivateKeyVer = privateKeyVer
+}
+
+func NewPrivateKeyFromBytes(data []byte, compressed bool) *PrivateKey {
+	return &PrivateKey{
+		bytes:      data,
+		compressed: compressed,
+		version:    activeNetPrivateKeyVer,
+	}
+}
+
 func PrivateKeyFromBytes(privateKeyBytes []byte) *PrivateKey {
 
 	privateKey := PrivateKey{
 		//D:         new(big.Int).SetBytes(privateKeyBytes),
 		bytes:   privateKeyBytes,
-		version: DumpedPrivateKeyVersion,
+		version: activeNetPrivateKeyVer,
 	}
 	return &privateKey
+}
+
+func (privateKey *PrivateKey) IsCompressed() bool {
+	return privateKey.compressed
+}
+
+func (privateKey *PrivateKey) GetBytes() []byte {
+	return privateKey.bytes
 }
 
 func (privateKey *PrivateKey) PubKey() *PublicKey {
 	_, secp256k1PublicKey, err := secp256k1.EcPubkeyCreate(secp256k1Context, privateKey.bytes)
 	if err != nil {
-		fmt.Println(err.Error())
 		return nil
 	}
 	publicKey := PublicKey{SecpPubKey: secp256k1PublicKey, Compressed: privateKey.compressed}
@@ -70,7 +89,7 @@ func DecodePrivateKey(encoded string) (*PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	if version != DumpedPrivateKeyVersion {
+	if version != activeNetPrivateKeyVer {
 		return nil, errors.Errorf("Mismatched version number ,trying to cross network , got version is %d", version)
 	}
 	var compressed bool

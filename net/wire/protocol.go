@@ -12,13 +12,13 @@ import (
 
 const (
 	// ProtocolVersion is the latest protocol version this package supports.
-	ProtocolVersion uint32 = 70015
+	ProtocolVersion uint32 = 70013
 
 	// MultipleAddressVersion is the protocol version which added multiple
 	// addresses per message (pver >= MultipleAddressVersion).
 	MultipleAddressVersion uint32 = 209
 
-	// In this version, 'getheaders' was introduced.
+	// GetHeadersVersion is where 'getheaders' was introduced.
 	GetHeadersVersion uint32 = 31800
 
 	// NetAddressTimeVersion is the protocol version which added the
@@ -54,10 +54,10 @@ const (
 	// feefilter message.
 	FeeFilterVersion uint32 = 70013
 
-	// short-id-based block download starts with this version
+	// ShortIdsBlocksVersion is the version which short-id-based block download starts with
 	ShortIdsBlocksVersion uint32 = 70014
 
-	//! not banning for invalid compact blocks starts with this version
+	//InvalidCBNoBanVersion is the version which not banning for invalid compact blocks starts with
 	InvalidCBNoBanVersion uint32 = 70015
 )
 
@@ -156,17 +156,16 @@ type BitcoinNet uint32
 // better idea to simply disconnect clients that are misbehaving over TCP.
 const (
 	// MainNet represents the main bitcoin network.
-	MainNet BitcoinNet = 0xe8f3e1e3
+	MainNet       BitcoinNet = 0xe8f3e1e3
 	MainDiskMagic BitcoinNet = 0xd9b4bef9
 
 	// RegTestNet represents the regression test network.
-	RegTestNet BitcoinNet = 0xfabfb5da
+	RegTestNet   BitcoinNet = 0xfabfb5da
 	RegDiskMagic BitcoinNet = 0xdab5bffa
 
 	// TestNet3 represents the test network (version 3).
-	TestNet3 BitcoinNet = 0xf4f3e5f4
+	TestNet3      BitcoinNet = 0xf4f3e5f4
 	TestDiskMagic BitcoinNet = 0x0709110b
-
 )
 
 // bnStrings is a map of bitcoin networks back to their constant names for

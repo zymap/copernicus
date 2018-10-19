@@ -2,6 +2,7 @@ package utxo
 
 import (
 	"bytes"
+	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/model/outpoint"
 	"github.com/copernet/copernicus/persist/db"
 	"github.com/copernet/copernicus/util"
@@ -35,7 +36,10 @@ func (coinKey *CoinKey) Unserialize(reader io.Reader) error {
 
 func (coinKey *CoinKey) GetSerKey() []byte {
 	buf := bytes.NewBuffer(nil)
-	coinKey.Serialize(buf)
+	err := coinKey.Serialize(buf)
+	if err != nil {
+		log.Error("coinKey:serialize buf failed %v", err)
+	}
 	return buf.Bytes()
 }
 

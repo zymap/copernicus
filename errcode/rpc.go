@@ -1,22 +1,21 @@
 package errcode
 
-type RpcErr int
-
-const RpcBase RpcErr = 2000
+type RPCErr int
 
 const (
-	ModelValid RpcErr = RpcBase + iota
+	ModelValid RPCErr = RPCErrorBase + iota
 	ModelInvalid
 	ModelError
+	ErrorNotExistInRPCMap
 )
 
-var rpcDesc = map[RpcErr]string{
-	ModelValid:   "valid",
-	ModelInvalid: "invalid",
-	ModelError:   "error",
+var rpcDesc = map[RPCErr]string{
+	ModelValid:   "Valid",
+	ModelInvalid: "Invalid",
+	ModelError:   "Error",
 }
 
-func (re RpcErr) String() string {
+func (re RPCErr) String() string {
 	msg, ok := rpcDesc[re]
 	if ok {
 		return msg

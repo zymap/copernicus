@@ -37,21 +37,21 @@ func NewAddNodeCmd(addr string, subCmd AddNodeSubCmd) *AddNodeCmd {
 }
 
 type DisconnectNodeCmd struct {
-	Address *string
-	ID      *int
+	Target string `json:"target"`
 }
 
 // TransactionInput represents the inputs to a transaction.  Specifically a
 // transaction hash and output number pair.
 type TransactionInput struct {
-	Txid string `json:"txid"`
-	Vout uint32 `json:"vout"`
+	Txid     string `json:"txid"`
+	Vout     uint32 `json:"vout"`
+	Sequence *int64 `json:"sequence"`
 }
 
 // CreateRawTransactionCmd defines the createrawtransaction JSON-RPC command.
 type CreateRawTransactionCmd struct {
 	Inputs   []TransactionInput
-	Amounts  map[string]float64 `jsonrpcusage:"{\"address\":amount,...}"` // In BTC
+	Outputs  map[string]interface{}
 	LockTime *int64
 }
 
@@ -59,19 +59,19 @@ type CreateRawTransactionCmd struct {
 // a createrawtransaction JSON-RPC command.
 //
 // Amounts are in BTC.
-func NewCreateRawTransactionCmd(inputs []TransactionInput, amounts map[string]float64,
+func NewCreateRawTransactionCmd(inputs []TransactionInput, outputs map[string]interface{},
 	lockTime *int64) *CreateRawTransactionCmd {
 
 	return &CreateRawTransactionCmd{
 		Inputs:   inputs,
-		Amounts:  amounts,
+		Outputs:  outputs,
 		LockTime: lockTime,
 	}
 }
 
 // DecodeRawTransactionCmd defines the decoderawtransaction JSON-RPC command.
 type DecodeRawTransactionCmd struct {
-	HexTx string
+	HexTx string `json:"hexstring"`
 }
 
 // NewDecodeRawTransactionCmd returns a new instance which can be used to issue
@@ -84,7 +84,7 @@ func NewDecodeRawTransactionCmd(hexTx string) *DecodeRawTransactionCmd {
 
 // DecodeScriptCmd defines the decodescript JSON-RPC command.
 type DecodeScriptCmd struct {
-	HexScript string
+	HexScript string `json:"hexstring"`
 }
 
 // NewDecodeScriptCmd returns a new instance which can be used to issue a
@@ -93,6 +93,26 @@ func NewDecodeScriptCmd(hexScript string) *DecodeScriptCmd {
 	return &DecodeScriptCmd{
 		HexScript: hexScript,
 	}
+}
+
+// EchoCmd defines the echo JSON-RPC command.
+type EchoCmd struct {
+	Arg0 *string
+	Arg1 *string
+	Arg2 *string
+	Arg3 *string
+	Arg4 *string
+	Arg5 *string
+	Arg6 *string
+	Arg7 *string
+	Arg8 *string
+	Arg9 *string
+}
+
+// NewEchoCmd returns a new instance which can be used to issue a echo JSON-RPC
+// command.
+func NewEchoCmd() *EchoCmd {
+	return &EchoCmd{}
 }
 
 // GetAddedNodeInfoCmd defines the getaddednodeinfo JSON-RPC command.
@@ -122,9 +142,8 @@ func NewGetBestBlockHashCmd() *GetBestBlockHashCmd {
 
 // GetBlockCmd defines the getblock JSON-RPC command.
 type GetBlockCmd struct {
-	Hash    string
-	Verbose *bool `jsonrpcdefault:"true"`
-	//VerboseTx *bool `jsonrpcdefault:"false"`  // todo check no such item
+	Hash    string `json:"blockhash"`
+	Verbose *bool  `json:"verbose" jsonrpcdefault:"true"`
 }
 
 // NewGetBlockCmd returns a new instance which can be used to issue a getblock
@@ -160,12 +179,12 @@ func NewGetBlockCountCmd() *GetBlockCountCmd {
 
 // GetBlockHashCmd defines the getblockhash JSON-RPC command.
 type GetBlockHashCmd struct {
-	Height int
+	Height int32 `json:"height"`
 }
 
 // NewGetBlockHashCmd returns a new instance which can be used to issue a
 // getblockhash JSON-RPC command.
-func NewGetBlockHashCmd(index int) *GetBlockHashCmd {
+func NewGetBlockHashCmd(index int32) *GetBlockHashCmd {
 	return &GetBlockHashCmd{
 		Height: index,
 	}
@@ -183,6 +202,24 @@ func NewGetBlockHeaderCmd(hash string, verbose *bool) *GetBlockHeaderCmd {
 	return &GetBlockHeaderCmd{
 		Hash:    hash,
 		Verbose: verbose,
+	}
+}
+
+// GetChainTxStatsCmd defines the getchaintxstats JSON-RPC command.
+type GetChainTxStatsCmd struct {
+	Blocks    *int32
+	BlockHash *string
+}
+
+// NewGetChainTxStatsCmd returns a new instance which can be used to issue a getchaintxstats
+// JSON-RPC command.
+//
+// The parameters which are pointers indicate they are optional.  Passing nil
+// for optional parameters will use the default value.
+func NewGetChainTxStatsCmd(numBlocks *int32, hash *string) *GetChainTxStatsCmd {
+	return &GetChainTxStatsCmd{
+		Blocks:    numBlocks,
+		BlockHash: hash,
 	}
 }
 
@@ -211,7 +248,7 @@ type TemplateRequest struct {
 	WorkID string `json:"workid,omitempty"`
 
 	// BCH
-	Rules []string `json:"rules"`
+	Rules []string `json:"rules,omitempty"`
 }
 
 // convertTemplateRequestField potentially converts the provided value as
@@ -263,7 +300,7 @@ func (t *TemplateRequest) UnmarshalJSON(data []byte) error {
 
 // GetBlockTemplateCmd defines the getblocktemplate JSON-RPC command.
 type GetBlockTemplateCmd struct {
-	Request *TemplateRequest
+	Request *TemplateRequest `json:"template_request" jsonrpcusage:"template_request"`
 }
 
 // NewGetBlockTemplateCmd returns a new instance which can be used to issue a
@@ -382,8 +419,8 @@ func NewGetNetTotalsCmd() *GetNetTotalsCmd {
 
 // GetNetworkHashPSCmd defines the getnetworkhashps JSON-RPC command.
 type GetNetworkHashPSCmd struct {
-	Blocks *int   `jsonrpcdefault:"120"`
-	Height *int32 `jsonrpcdefault:"-1"`
+	Blocks *int32 `json:"nblocks" jsonrpcdefault:"120"`
+	Height *int32 `json:"height" jsonrpcdefault:"-1"`
 }
 
 // NewGetNetworkHashPSCmd returns a new instance which can be used to issue a
@@ -391,7 +428,7 @@ type GetNetworkHashPSCmd struct {
 //
 // The parameters which are pointers indicate they are optional.  Passing nil
 // for optional parameters will use the default value.
-func NewGetNetworkHashPSCmd(numBlocks *int, height *int32) *GetNetworkHashPSCmd {
+func NewGetNetworkHashPSCmd(numBlocks *int32, height *int32) *GetNetworkHashPSCmd {
 	return &GetNetworkHashPSCmd{
 		Blocks: numBlocks,
 		Height: height,
@@ -428,8 +465,8 @@ func NewGetRawMempoolCmd(verbose *bool) *GetRawMempoolCmd {
 // NOTE: This field is an int versus a bool to remain compatible with Bitcoin
 // Core even though it really should be a bool.
 type GetRawTransactionCmd struct {
-	Txid    string
-	Verbose *int `jsonrpcdefault:"0"`
+	Txid    string `json:"txid"`
+	Verbose *bool  `json:"verbose" jsonrpcdefault:"false"`
 }
 
 // NewGetRawTransactionCmd returns a new instance which can be used to issue a
@@ -437,7 +474,7 @@ type GetRawTransactionCmd struct {
 //
 // The parameters which are pointers indicate they are optional.  Passing nil
 // for optional parameters will use the default value.
-func NewGetRawTransactionCmd(txHash string, verbose *int) *GetRawTransactionCmd {
+func NewGetRawTransactionCmd(txHash string, verbose *bool) *GetRawTransactionCmd {
 	return &GetRawTransactionCmd{
 		Txid:    txHash,
 		Verbose: verbose,
@@ -523,6 +560,13 @@ func NewHelpCmd(command *string) *HelpCmd {
 	}
 }
 
+// VersionCmd defines the version JSON-RPC command.
+type VersionCmd struct{}
+
+// NewVersionCmd returns a new instance which can be used to issue a JSON-RPC
+// version command.
+func NewVersionCmd() *VersionCmd { return new(VersionCmd) }
+
 // InvalidateBlockCmd defines the invalidateblock JSON-RPC command.
 type InvalidateBlockCmd struct {
 	BlockHash string
@@ -601,8 +645,8 @@ func NewSearchRawTransactionsCmd(address string, verbose, skip, count *int, vinE
 
 // SendRawTransactionCmd defines the sendrawtransaction JSON-RPC command.
 type SendRawTransactionCmd struct {
-	HexTx         string
-	AllowHighFees *bool `jsonrpcdefault:"false"`
+	HexTx         string `json:"hexstring"`
+	AllowHighFees *bool  `json:"allowhighfees" jsonrpcdefault:"false"`
 }
 
 // NewSendRawTransactionCmd returns a new instance which can be used to issue a
@@ -750,30 +794,32 @@ func NewPruneBlockChainCmd(height *int) *PruneBlockChainCmd {
 
 type GetMempoolAncestorsCmd struct {
 	TxID    string `json:"txid"`
-	Verbose bool   `json:"verbose";jsonrpcdefault:"false"`
+	Verbose *bool  `json:"verbose" jsonrpcdefault:"false"`
+	// todo
 }
 
 type GetMempoolDescendantsCmd struct {
 	TxID    string `json:"txid"`
-	Verbose bool   `json:"verbose";jsonrpcdefault:"false"`
+	Verbose *bool  `json:"verbose" jsonrpcdefault:"false"`
+	// todo
 }
 
 // RawTxInput models the data needed for raw transaction input that is used in
 // the SignRawTransactionCmd struct.
 type RawTxInput struct {
-	Txid         string `json:"txid"`
-	Vout         uint32 `json:"vout"`
-	ScriptPubKey string `json:"scriptPubKey"`
-	RedeemScript string `json:"redeemScript"`
-	Amount       *int   `json:"amount"`
+	Txid         string      `json:"txid"`
+	Vout         uint32      `json:"vout"`
+	ScriptPubKey string      `json:"scriptPubKey"`
+	RedeemScript *string     `json:"redeemScript"`
+	Amount       interface{} `json:"amount"`
 }
 
 // SignRawTransactionCmd defines the signrawtransaction JSON-RPC command.
 type SignRawTransactionCmd struct {
-	RawTx    string
-	Inputs   *[]RawTxInput
-	PrivKeys *[]string
-	Flags    *string `jsonrpcdefault:"\"ALL\""`
+	HexTx       string        `json:"hexstring"`
+	PrevTxs     *[]RawTxInput `json:"prevtxs"`
+	PrivKeys    *[]string     `json:"privkeys"`
+	SigHashType *string       `json:"sighashtype"`
 }
 
 type VerifyTxoutProofCmd struct {
@@ -804,6 +850,17 @@ type SetNetWorkActiveCmd struct {
 	State bool `jsonrpcusage:"\"true|false\""`
 }
 
+// WaitForBlockHeightCmd defines the waitforblockheight JSON-RPC command.
+type WaitForBlockHeightCmd struct {
+	Height  int32 `json:"height"`
+	Timeout *int  `json:"timeout" jsonrpcdefault:"0"`
+}
+
+// NewWaitForBlockHeightCmd returns a new instance which can be used to issue a
+// waitforblockheight JSON-RPC command.
+func NewWaitForBlockHeightCmd() *WaitForBlockHeightCmd {
+	return &WaitForBlockHeightCmd{}
+}
 
 func init() {
 	// No special flags for commands in this file.
@@ -822,6 +879,7 @@ func init() {
 	MustRegisterCmd("getblockheader", (*GetBlockHeaderCmd)(nil), flags)
 	MustRegisterCmd("getblocktemplate", (*GetBlockTemplateCmd)(nil), flags)
 	MustRegisterCmd("getchaintips", (*GetChainTipsCmd)(nil), flags)
+	MustRegisterCmd("getchaintxstats", (*GetChainTxStatsCmd)(nil), flags)
 	MustRegisterCmd("getconnectioncount", (*GetConnectionCountCmd)(nil), flags)
 	MustRegisterCmd("getdifficulty", (*GetDifficultyCmd)(nil), flags)
 	MustRegisterCmd("getgenerate", (*GetGenerateCmd)(nil), flags)
@@ -841,6 +899,7 @@ func init() {
 	MustRegisterCmd("gettxoutsetinfo", (*GetTxOutSetInfoCmd)(nil), flags)
 	MustRegisterCmd("getwork", (*GetWorkCmd)(nil), flags)
 	MustRegisterCmd("help", (*HelpCmd)(nil), flags)
+	MustRegisterCmd("version", (*VersionCmd)(nil), flags)
 	MustRegisterCmd("invalidateblock", (*InvalidateBlockCmd)(nil), flags)
 	MustRegisterCmd("ping", (*PingCmd)(nil), flags)
 	MustRegisterCmd("preciousblock", (*PreciousBlockCmd)(nil), flags)
@@ -870,4 +929,9 @@ func init() {
 	MustRegisterCmd("getexcessiveblock", (*GetExcessiveBlockCmd)(nil), flags)
 	MustRegisterCmd("pruneblockchain", (*PruneBlockChainCmd)(nil), flags)
 	MustRegisterCmd("createmultisig", (*CreateMultiSigCmd)(nil), flags)
+	MustRegisterCmd("estimatefee", (*EstimateFeeCmd)(nil), flags)
+
+	MustRegisterCmd("waitforblockheight", (*WaitForBlockHeightCmd)(nil), flags)
+	MustRegisterCmd("echo", (*EchoCmd)(nil), flags)
+
 }

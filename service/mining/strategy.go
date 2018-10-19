@@ -1,8 +1,8 @@
 package mining
 
 import (
-	"github.com/astaxie/beego/logs"
 	"github.com/copernet/copernicus/conf"
+	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/model/mempool"
 	"github.com/copernet/copernicus/util"
 	"github.com/google/btree"
@@ -29,22 +29,26 @@ type EntryFeeSort mempool.TxEntry
 
 func (e EntryFeeSort) Less(than btree.Item) bool {
 	t := than.(EntryFeeSort)
-	if e.SumFeeWithAncestors == t.SumFeeWithAncestors {
+	if e.SumTxFeeWithAncestors == t.SumTxFeeWithAncestors {
 		eHash := e.Tx.GetHash()
 		tHash := t.Tx.GetHash()
 		return eHash.Cmp(&tHash) > 0
 	}
-	return e.SumFeeWithAncestors < than.(EntryFeeSort).SumFeeWithAncestors
+	return e.SumTxFeeWithAncestors < than.(EntryFeeSort).SumTxFeeWithAncestors
 }
 
 func sortedByFeeWithAncestors() *btree.BTree {
 	b := btree.New(32)
 	mpool := mempool.GetInstance()
-	mpool.Lock()
-	defer mpool.Unlock()
+
 	for _, txEntry := range mpool.GetAllTxEntry() {
 		b.ReplaceOrInsert(EntryFeeSort(*txEntry))
 	}
+
+	b.Descend(func(i btree.Item) bool {
+		_ = i.(EntryFeeSort)
+		return true
+	})
 	return b
 }
 
@@ -53,8 +57,8 @@ type EntryAncestorFeeRateSort mempool.TxEntry
 
 func (r EntryAncestorFeeRateSort) Less(than btree.Item) bool {
 	t := than.(EntryAncestorFeeRateSort)
-	b1 := util.NewFeeRateWithSize((r).SumFeeWithAncestors, r.SumSizeWitAncestors).SataoshisPerK
-	b2 := util.NewFeeRateWithSize(t.SumFeeWithAncestors, t.SumSizeWitAncestors).SataoshisPerK
+	b1 := util.NewFeeRateWithSize((r).SumTxFeeWithAncestors, r.SumTxSizeWitAncestors).SataoshisPerK
+	b2 := util.NewFeeRateWithSize(t.SumTxFeeWithAncestors, t.SumTxSizeWitAncestors).SataoshisPerK
 	if b1 == b2 {
 		rHash := r.Tx.GetHash()
 		tHash := t.Tx.GetHash()
@@ -66,20 +70,29 @@ func (r EntryAncestorFeeRateSort) Less(than btree.Item) bool {
 func sortedByFeeRateWithAncestors() *btree.BTree {
 	b := btree.New(32)
 	mpool := mempool.GetInstance()
-	mpool.Lock()
-	defer mpool.Unlock()
+
 	for _, txEntry := range mpool.GetAllTxEntry() {
 		b.ReplaceOrInsert(EntryAncestorFeeRateSort(*txEntry))
 	}
+
+	b.Descend(func(i btree.Item) bool {
+		_ = i.(EntryAncestorFeeRateSort)
+		return true
+	})
 	return b
 }
 
-func init() {
+func getStrategy() *sortType {
+	if strategy != 0 {
+		return &strategy
+	}
+
 	sortParam := conf.Cfg.Mining.Strategy
 	ret, ok := strategies[sortParam]
 	if !ok {
-		logs.Error("the specified strategy< %s > is not exist, so use default strategy< %s >", sortParam, defaultSortStrategy)
+		log.Error("the specified strategy< %s > is not exist, so use default strategy< %s >", sortParam, defaultSortStrategy)
 		strategy = defaultSortStrategy
 	}
 	strategy = ret
+	return &strategy
 }

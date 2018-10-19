@@ -8,28 +8,28 @@ import (
 var mockTime int64
 var timeOffset int64
 
-func GetMockTime() int64 {
+func GetTime() int64 {
 	if mockTime > 0 {
 		return mockTime
 	}
-	return int64(time.Now().Unix())
+	return time.Now().Unix()
 }
 
 func SetMockTime(time int64) {
 	mockTime = time
 }
 
-func GetMillisTime() int64 {
-	return time.Now().Unix()
-}
+//func GetMillisTime() int64 {
+//	return time.Now().Unix()
+//}
 
 func GetMicrosTime() int64 {
 	return time.Now().UnixNano()
 }
 
-func GetTimeInSeconds() int64 {
-	return int64(time.Now().Second())
-}
+//func GetTimeInSeconds() int64 {
+//	return int64(time.Now().Second())
+//}
 
 func GetMockTimeInMicros() int64 {
 	if mockTime > 0 {
@@ -39,7 +39,7 @@ func GetMockTimeInMicros() int64 {
 }
 
 func GetAdjustedTime() int64 {
-	return GetMockTime() + GetTimeOffset()
+	return GetTime() + GetTimeOffset()
 }
 
 func GetTimeOffset() int64 {

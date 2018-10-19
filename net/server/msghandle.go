@@ -1,17 +1,26 @@
+package server
+
 // Copyright (c) 2013-2017 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
-package server
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"github.com/copernet/copernicus/errcode"
+	"strconv"
+	"strings"
 
+	"github.com/copernet/copernicus/conf"
 	"github.com/copernet/copernicus/log"
+	"github.com/copernet/copernicus/model/mempool"
 	"github.com/copernet/copernicus/net/wire"
 	"github.com/copernet/copernicus/peer"
 	"github.com/copernet/copernicus/rpc/btcjson"
 	"github.com/copernet/copernicus/service"
+	"github.com/copernet/copernicus/util"
+	"net"
 )
 
 type MsgHandle struct {
@@ -21,12 +30,11 @@ type MsgHandle struct {
 
 var msgHandle *MsgHandle
 
-// NewMsgHandle create a msgHandle for these message from peer And RPC.
+// SetMsgHandle create a msgHandle for these message from peer And RPC.
 // Then begins the core block handler which processes block and inv messages.
 func SetMsgHandle(ctx context.Context, msgChan <-chan *peer.PeerMessage, server *Server) {
 	msg := &MsgHandle{msgChan, server}
-	ctxChild, _ := context.WithCancel(ctx)
-	go msg.startProcess(ctxChild)
+	go msg.startProcess(ctx)
 	msgHandle = msg
 }
 
@@ -39,7 +47,7 @@ out:
 			peerFrom := msg.Peerp
 			switch data := msg.Msg.(type) {
 			case *wire.MsgVersion:
-				peerFrom.PushRejectMsg(data.Command(), wire.RejectDuplicate, "duplicate version message",
+				peerFrom.PushRejectMsg(data.Command(), errcode.RejectDuplicate, "duplicate version message",
 					nil, false)
 				peerFrom.Disconnect()
 				msg.Done <- struct{}{}
@@ -84,16 +92,21 @@ out:
 			case *wire.MsgMemPool:
 				if peerFrom.Cfg.Listeners.OnTransferMsgToBusinessPro != nil {
 					peerFrom.Cfg.Listeners.OnTransferMsgToBusinessPro(msg, msg.Done)
+				} else if peerFrom.Cfg.Listeners.OnMemPool != nil {
+					peerFrom.Cfg.Listeners.OnMemPool(peerFrom, data)
+					msg.Done <- struct{}{}
 				}
+
 			case *wire.MsgTx:
 				if peerFrom.Cfg.Listeners.OnTx != nil {
 					peerFrom.Cfg.Listeners.OnTx(peerFrom, data, msg.Done)
 				}
+
 			case *wire.MsgBlock:
-				log.Trace("recv bitcoin MsgBlock news ...")
 				if peerFrom.Cfg.Listeners.OnBlock != nil {
 					peerFrom.Cfg.Listeners.OnBlock(peerFrom, data, msg.Buf, msg.Done)
 				}
+
 			case *wire.MsgInv:
 				if peerFrom.Cfg.Listeners.OnInv != nil {
 					peerFrom.Cfg.Listeners.OnInv(peerFrom, data)
@@ -112,11 +125,19 @@ out:
 			case *wire.MsgGetData:
 				if peerFrom.Cfg.Listeners.OnTransferMsgToBusinessPro != nil {
 					peerFrom.Cfg.Listeners.OnTransferMsgToBusinessPro(msg, msg.Done)
+				} else if peerFrom.Cfg.Listeners.OnGetData != nil {
+					peerFrom.Cfg.Listeners.OnGetData(peerFrom, data)
+					msg.Done <- struct{}{}
 				}
+
 			case *wire.MsgGetBlocks:
-				if peerFrom.Cfg.Listeners.OnTransferMsgToBusinessPro != nil{
+				if peerFrom.Cfg.Listeners.OnTransferMsgToBusinessPro != nil {
 					peerFrom.Cfg.Listeners.OnTransferMsgToBusinessPro(msg, msg.Done)
+				} else if peerFrom.Cfg.Listeners.OnGetBlocks != nil {
+					peerFrom.Cfg.Listeners.OnGetBlocks(peerFrom, data)
+					msg.Done <- struct{}{}
 				}
+
 			case *wire.MsgGetHeaders:
 				if peerFrom.Cfg.Listeners.OnGetHeaders != nil {
 					peerFrom.Cfg.Listeners.OnGetHeaders(peerFrom, data)
@@ -159,7 +180,7 @@ out:
 				msg.Done <- struct{}{}
 			default:
 				log.Debug("Received unhandled message of type %v "+
-					"from %v", data.Command())
+					"from %v", data, data.Command())
 			}
 		case <-ctx.Done():
 			log.Info("msgHandle service exit. function : startProcess")
@@ -169,30 +190,33 @@ out:
 
 }
 
-// Rpc process things
-func ProcessForRpc(message interface{}) (rsp interface{}, err error) {
+// ProcessForRPC are RPC process things
+func ProcessForRPC(message interface{}) (rsp interface{}, err error) {
 	switch m := message.(type) {
 
 	case *service.GetConnectionCountRequest:
-		return msgHandle.ConnectedCount(), nil
+		rsp := &service.GetConnectionCountResponse{
+			Count: int(msgHandle.ConnectedCount()),
+		}
+		return rsp, nil
 
 	case *wire.MsgPing:
 		msgHandle.BroadcastMessage(m)
 		return nil, nil
 
 	case *service.GetPeersInfoRequest:
-		return NewRpcConnManager(msgHandle.Server).ConnectedPeers(), nil
+		return NewRPCConnManager(msgHandle.Server).ConnectedPeers(), nil
 
 	case *btcjson.AddNodeCmd:
 		cmd := message.(*btcjson.AddNodeCmd)
 		var err error
 		switch cmd.SubCmd {
 		case "add":
-			err = NewRpcConnManager(msgHandle.Server).Connect(cmd.Addr, true)
+			err = NewRPCConnManager(msgHandle.Server).Connect(cmd.Addr, true)
 		case "remove":
-			err = NewRpcConnManager(msgHandle.Server).RemoveByAddr(cmd.Addr)
+			err = NewRPCConnManager(msgHandle.Server).RemoveByAddr(cmd.Addr)
 		case "onetry":
-			err = NewRpcConnManager(msgHandle.Server).Connect(cmd.Addr, false)
+			err = NewRPCConnManager(msgHandle.Server).Connect(cmd.Addr, false)
 		default:
 			return nil, &btcjson.RPCError{
 				Code:    btcjson.ErrRPCInvalidParameter,
@@ -209,7 +233,36 @@ func ProcessForRpc(message interface{}) (rsp interface{}, err error) {
 		return nil, nil
 
 	case *btcjson.DisconnectNodeCmd:
-		return
+		cmd := message.(*btcjson.DisconnectNodeCmd)
+
+		var addr string
+		var nodeID uint64
+		var errN, err error
+
+		// If we have a valid uint disconnect by node id. Otherwise,
+		// attempt to disconnect by address, returning an error if a
+		// valid IP address is not supplied.
+		if nodeID, errN = strconv.ParseUint(cmd.Target, 10, 32); errN == nil {
+			err = NewRPCConnManager(msgHandle.Server).DisconnectByID(int32(nodeID))
+		} else {
+			if host, port, errP := net.SplitHostPort(cmd.Target); errP == nil {
+				addr = net.JoinHostPort(host, port)
+				err = NewRPCConnManager(msgHandle.Server).DisconnectByAddr(addr)
+			} else {
+				return nil, &btcjson.RPCError{
+					Code:    btcjson.ErrRPCInvalidParameter,
+					Message: "invalid address or node ID",
+				}
+			}
+		}
+		if err != nil && peerExists(addr, int32(nodeID)) {
+
+			return nil, &btcjson.RPCError{
+				Code:    btcjson.ErrRPCMisc,
+				Message: "can't disconnect a permanent peer, use remove",
+			}
+		}
+		return nil, nil
 
 		//case *btcjson.GetAddedNodeInfoCmd:
 		//	return msgHandle.connManager.PersistentPeers(), nil
@@ -218,7 +271,7 @@ func ProcessForRpc(message interface{}) (rsp interface{}, err error) {
 		return
 
 	case *btcjson.GetNetworkInfoCmd:
-		return
+		return GetNetworkInfo()
 
 	case *btcjson.SetBanCmd:
 		return
@@ -227,6 +280,8 @@ func ProcessForRpc(message interface{}) (rsp interface{}, err error) {
 		return
 
 	case *service.ClearBannedRequest:
+		return
+	case *wire.InvVect:
 		return
 
 		//case *tx.Tx:
@@ -248,8 +303,108 @@ func ProcessForRpc(message interface{}) (rsp interface{}, err error) {
 		//	case BlockState:
 		//		return r, nil
 		//	}
-
 	}
 
 	return nil, errors.New("unknown rpc request")
+}
+
+func GetNetworkInfo() (*btcjson.GetNetworkInfoResult, error) {
+	verNum := 0
+	vers := strings.Split(conf.Cfg.Version, ".")
+	for _, ver := range vers {
+		subVer, err := strconv.Atoi(ver)
+		if err == nil {
+			verNum = verNum*1000 + subVer
+		}
+	}
+
+	localAddrInfo := msgHandle.addrManager.GetAllLocalAddress()
+	rpcLocalAddrList := make([]btcjson.LocalAddressesResult, 0, len(localAddrInfo))
+	for _, localAddr := range localAddrInfo {
+		rpcLocalAddr := btcjson.LocalAddressesResult{
+			Address: localAddr.Na.IP.String(),
+			Port:    localAddr.Na.Port,
+			Score:   localAddr.Score,
+		}
+		rpcLocalAddrList = append(rpcLocalAddrList, rpcLocalAddr)
+	}
+
+	chainInfo := &btcjson.GetNetworkInfoResult{
+		Version:          verNum,
+		SubVersion:       "/Copernicus:" + conf.Cfg.Version + "/",
+		ProtocolVersion:  wire.ProtocolVersion,
+		LocalServices:    "0", // TODO:
+		LocalRelay:       !conf.Cfg.P2PNet.BlocksOnly,
+		TimeOffset:       util.GetTimeOffset(),
+		Connections:      msgHandle.ConnectedCount(),
+		NetworkActive:    true, // NOT support RPC 'setnetworkactive'
+		Networks:         getNetworksInfo(),
+		RelayFee:         valueFromAmount(mempool.GetInstance().GetMinFeeRate().SataoshisPerK),
+		ExcessUtxoCharge: 0,
+		LocalAddresses:   rpcLocalAddrList,
+		Warnings:         "", // TODO: network warnings
+	}
+	return chainInfo, nil
+}
+
+func getNetworksInfo() []btcjson.NetworksResult {
+	networkInfos := make([]btcjson.NetworksResult, 0)
+	ipv4NetWork := btcjson.NetworksResult{
+		Name:      "ipv4",
+		Limited:   false,
+		Reachable: true,
+		//Proxy                     string `json:"proxy"`
+		//ProxyRandomizeCredentials bool   `json:"proxy_randomize_credentials"`
+	}
+	ipv6NetWork := btcjson.NetworksResult{
+		Name:      "ipv6",
+		Limited:   false,
+		Reachable: true,
+		//Proxy                     string `json:"proxy"`
+		//ProxyRandomizeCredentials bool   `json:"proxy_randomize_credentials"`
+	}
+	onionNetWork := btcjson.NetworksResult{
+		Name:      "ipv4",
+		Limited:   conf.Cfg.P2PNet.NoOnion,
+		Reachable: !conf.Cfg.P2PNet.NoOnion,
+		//Proxy                     string `json:"proxy"`
+		//ProxyRandomizeCredentials bool   `json:"proxy_randomize_credentials"`
+	}
+	networkInfos = append(networkInfos, ipv4NetWork, ipv6NetWork, onionNetWork)
+	return networkInfos
+}
+
+func valueFromAmount(sizeLimit int64) float64 {
+	var nAbs int64
+	var strFormat string
+	if sizeLimit < 0 {
+		nAbs = -sizeLimit
+		strFormat = "-%d.%08d"
+	} else {
+		nAbs = sizeLimit
+		strFormat = "%d.%08d"
+	}
+	quotient := nAbs / util.COIN
+	remainder := nAbs % util.COIN
+	strValue := fmt.Sprintf(strFormat, quotient, remainder)
+
+	result, err := strconv.ParseFloat(strValue, 64)
+	if err != nil {
+		return 0
+	}
+	return result
+}
+
+// peerExists determines if a certain peer is currently connected given
+// information about all currently connected peers. Peer existence is
+// determined using either a target address or node id.
+func peerExists(addr string, nodeID int32) bool {
+	connected := NewRPCConnManager(msgHandle.Server).ConnectedPeers()
+
+	for _, p := range connected {
+		if p.ToPeer().ID() == nodeID || p.ToPeer().Addr() == addr {
+			return true
+		}
+	}
+	return false
 }

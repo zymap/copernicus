@@ -85,7 +85,7 @@ const maxAlertSize = MaxMessagePayload - maxSignatureSize - MaxVarIntPayload - 1
 // fit into a maximum size alert.
 //
 // maxAlertSize = fixedAlertSize + max(SetCancel) + max(SetSubVer) + 3*(string)
-// for caculating maximum number of cancel IDs, set all other var  sizes to 0
+// for calculating maximum number of cancel IDs, set all other var  sizes to 0
 // maxAlertSize = fixedAlertSize + (MaxVarIntPayload-1) + x*sizeOf(int32)
 // x = (maxAlertSize - fixedAlertSize - MaxVarIntPayload + 1) / 4
 const maxCountSetCancel = (maxAlertSize - fixedAlertSize - MaxVarIntPayload + 1) / 4
@@ -94,7 +94,7 @@ const maxCountSetCancel = (maxAlertSize - fixedAlertSize - MaxVarIntPayload + 1)
 // fit into a maximum size alert.
 //
 // maxAlertSize = fixedAlertSize + max(SetCancel) + max(SetSubVer) + 3*(string)
-// for caculating maximum number of subversions, set all other var sizes to 0
+// for calculating maximum number of subversions, set all other var sizes to 0
 // maxAlertSize = fixedAlertSize + (MaxVarIntPayload-1) + x*sizeOf(string)
 // x = (maxAlertSize - fixedAlertSize - MaxVarIntPayload + 1) / sizeOf(string)
 // subversion would typically be something like "/Satoshi:0.7.2/" (15 bytes)
@@ -211,9 +211,9 @@ func (alert *Alert) Serialize(w io.Writer, pver uint32) error {
 	return util.WriteVarString(w, alert.Reserved)
 }
 
-// Deserialize decodes from r into the receiver using the alert protocol
+// Unserialize decodes from r into the receiver using the alert protocol
 // encoding format.
-func (alert *Alert) Deserialize(r io.Reader, pver uint32) error {
+func (alert *Alert) Unserialize(r io.Reader, pver uint32) error {
 	err := util.ReadElements(r, &alert.Version, &alert.RelayUntil,
 		&alert.Expiration, &alert.ID, &alert.Cancel)
 	if err != nil {
@@ -230,7 +230,7 @@ func (alert *Alert) Deserialize(r io.Reader, pver uint32) error {
 	if count > maxCountSetCancel {
 		str := fmt.Sprintf("too many cancel alert IDs for alert "+
 			"[count %v, max %v]", count, maxCountSetCancel)
-		return messageError("Alert.Deserialize", str)
+		return messageError("Alert.Unserialize", str)
 	}
 	alert.SetCancel = make([]int32, count)
 	for i := 0; i < int(count); i++ {
@@ -254,7 +254,7 @@ func (alert *Alert) Deserialize(r io.Reader, pver uint32) error {
 	if count > maxCountSetSubVer {
 		str := fmt.Sprintf("too many sub versions for alert "+
 			"[count %v, max %v]", count, maxCountSetSubVer)
-		return messageError("Alert.Deserialize", str)
+		return messageError("Alert.Unserialize", str)
 	}
 	alert.SetSubVer = make([]string, count)
 	for i := 0; i < int(count); i++ {
@@ -307,7 +307,7 @@ func NewAlert(version int32, relayUntil int64, expiration int64,
 func NewAlertFromPayload(serializedPayload []byte, pver uint32) (*Alert, error) {
 	var alert Alert
 	r := bytes.NewReader(serializedPayload)
-	err := alert.Deserialize(r, pver)
+	err := alert.Unserialize(r, pver)
 	if err != nil {
 		return nil, err
 	}
@@ -329,7 +329,7 @@ type MsgAlert struct {
 	// Signature is the ECDSA signature of the message.
 	Signature []byte
 
-	// Deserialized Payload
+	// Unserialized Payload
 	Payload *Alert
 }
 
@@ -392,7 +392,7 @@ func (msg *MsgAlert) Command() string {
 
 // MaxPayloadLength returns the maximum length the payload can be for the
 // receiver.  This is part of the Message interface implementation.
-func (msg *MsgAlert) MaxPayloadLength(pver uint32) uint32 {
+func (msg *MsgAlert) MaxPayloadLength(pver uint32) uint64 {
 	// Since this can vary depending on the message, make it the max
 	// size allowed.
 	return MaxMessagePayload

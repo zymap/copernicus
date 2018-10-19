@@ -1,11 +1,10 @@
 package utxo
 
 import (
-	"fmt"
+	//"fmt"
 	"unsafe"
 
 	"github.com/copernet/copernicus/log"
-	"github.com/copernet/copernicus/model/chain"
 	"github.com/copernet/copernicus/model/outpoint"
 	"github.com/copernet/copernicus/util"
 	"github.com/hashicorp/golang-lru"
@@ -19,24 +18,20 @@ type CoinsLruCache struct {
 	dirtyCoins map[outpoint.OutPoint]*Coin //write database temporary cache
 }
 
-var utxoLruTip CacheView
+func (coinsCache *CoinsLruCache) GetCoinsDB() CoinsDB {
+	return coinsCache.db
+}
+
+func (coinsCache *CoinsLruCache) GetMap() map[outpoint.OutPoint]*Coin {
+	return coinsCache.dirtyCoins
+}
 
 func InitUtxoLruTip(uc *UtxoConfig) {
-	// fmt.Printf("InitUtxoLruTip processing ....%v \n", uc)
-
-	db := NewCoinsDB(uc.Do)
-	utxoLruTip = NewCoinsLruCache(*db)
-
+	db := newCoinsDB(uc.Do)
+	utxoTip = newCoinsLruCache(*db)
 }
 
-func GetUtxoLruCacheInstance() CacheView {
-	if utxoLruTip == nil {
-		log.Error("utxoTip has not init!!")
-	}
-	return utxoLruTip
-}
-
-func NewCoinsLruCache(db CoinsDB) CacheView {
+func newCoinsLruCache(db CoinsDB) CacheView {
 	c := new(CoinsLruCache)
 	c.db = db
 	cache, err := lru.New(1000000)
@@ -52,12 +47,12 @@ func NewCoinsLruCache(db CoinsDB) CacheView {
 func (coinsCache *CoinsLruCache) GetCoin(outpoint *outpoint.OutPoint) *Coin {
 	c, ok := coinsCache.cacheCoins.Get(*outpoint)
 	if ok {
-		fmt.Println("getCoin from cache")
+		log.Info("getCoin from cache")
 		return c.(*Coin)
 	}
 	db := coinsCache.db
 	coin, err := db.GetCoin(outpoint)
-	if err != nil && err == leveldb.ErrNotFound{
+	if err != nil && err == leveldb.ErrNotFound {
 		return nil
 	}
 	if err != nil {
@@ -73,7 +68,6 @@ func (coinsCache *CoinsLruCache) GetCoin(outpoint *outpoint.OutPoint) *Coin {
 		// our version as fresh.
 		coin.fresh = true
 	}
-	fmt.Println("getCoin from db")
 
 	return coin
 }
@@ -83,25 +77,23 @@ func (coinsCache *CoinsLruCache) HaveCoin(point *outpoint.OutPoint) bool {
 	return coin != nil && !coin.IsSpent()
 }
 
-func (coinsCache *CoinsLruCache) GetBestBlock() util.Hash {
+func (coinsCache *CoinsLruCache) GetBestBlock() (util.Hash, error) {
 	if coinsCache.hashBlock.IsNull() {
 		hashBlock, err := coinsCache.db.GetBestBlock()
 		if err == leveldb.ErrNotFound {
-			genesisHash  := chain.GetInstance().GetParams().GenesisBlock.GetHash()
-			coinsCache.hashBlock = genesisHash
-			return coinsCache.hashBlock
+			//genesisHash := chain.GetInstance().GetParams().GenesisBlock.GetHash()
+			//coinsCache.hashBlock = genesisHash
+			//return coinsCache.hashBlock, nil
+			return util.Hash{}, err
 		}
 		if err != nil {
 			log.Error("db.GetBestBlock err:%#v", err)
 			panic("db.GetBestBlock read err")
 		}
+		log.Debug("GetBestBlock: set coinsCache's besthash to %s from DB", hashBlock)
 		coinsCache.hashBlock = *hashBlock
 	}
-	return coinsCache.hashBlock
-}
-
-func (coinsCache *CoinsLruCache) SetBestBlock(hash util.Hash) {
-	coinsCache.hashBlock = hash
+	return coinsCache.hashBlock, nil
 }
 
 func (coinsCache *CoinsLruCache) UpdateCoins(cm *CoinsMap, hash *util.Hash) error {
@@ -112,22 +104,25 @@ func (coinsCache *CoinsLruCache) UpdateCoins(cm *CoinsMap, hash *util.Hash) erro
 			log.Error("MempoolCoin  save to DB!!!  %#v", tempCacheCoin)
 			panic("MempoolCoin  save to DB!!!")
 		}
-		if tempCacheCoin.dirty {
+		if tempCacheCoin.dirty || tempCacheCoin.fresh {
 			coin, ok := coinsCache.cacheCoins.Get(point)
 			// Lru could have deleted it from cache ,but ok.
 			if !ok {
-				if !(tempCacheCoin.fresh && tempCacheCoin.IsSpent()) {
+				if tempCacheCoin.fresh {
 					tempCacheCoin.dirty = true
 					coinsCache.cacheCoins.Add(point, tempCacheCoin)
+					//ret := coinsCache.cacheCoins.Add(point, tempCacheCoin)
+					//if !ret {
+					//	log.Error("lruCache:add coin failed, please check")
+					//}
 					coinsCache.dirtyCoins[point] = tempCacheCoin
-					if tempCacheCoin.fresh {
-						tempCacheCoin.fresh = true
-					}
+				} else {
+					panic("newcoin is dirty and not fresh, but oldcoin is not exist")
 				}
 			} else {
 				globalCacheCoin := coin.(*Coin)
-				if tempCacheCoin.fresh && !globalCacheCoin.IsSpent() {
-					panic("FRESH flag misapplied to cache entry for base transaction with spendable outputs")
+				if tempCacheCoin.fresh && globalCacheCoin.IsSpent() {
+					panic("newcoin fresh and oldcoin has spent")
 				}
 
 				if globalCacheCoin.fresh && tempCacheCoin.IsSpent() {
@@ -140,27 +135,31 @@ func (coinsCache *CoinsLruCache) UpdateCoins(cm *CoinsMap, hash *util.Hash) erro
 						delete(coinsCache.dirtyCoins, point)
 					}
 				} else {
-					*globalCacheCoin = *tempCacheCoin
-					globalCacheCoin.dirty = true
-					coinsCache.dirtyCoins[point] = globalCacheCoin
+					tempCacheCoin.dirty = true
+					coinsCache.cacheCoins.Add(point, tempCacheCoin)
+					coinsCache.dirtyCoins[point] = tempCacheCoin
 				}
 			}
 		}
 		delete(cm.cacheCoins, point)
 	}
+	log.Debug("UpdateCoins: set besthash to %s", hash)
 	coinsCache.hashBlock = *hash
 	return nil
 }
 
 func (coinsCache *CoinsLruCache) Flush() bool {
-	println("flush=============")
-	fmt.Printf("flush...coinsCache.cacheCoins====%#v \n  hashBlock====%#v", coinsCache.cacheCoins, coinsCache.hashBlock)
-	if len(coinsCache.dirtyCoins)>0 || !coinsCache.hashBlock.IsNull(){
+	log.Debug("flush utxo: bestblockhash:%s", coinsCache.hashBlock)
+
+	if len(coinsCache.dirtyCoins) > 0 || !coinsCache.hashBlock.IsNull() {
 		ok := coinsCache.db.BatchWrite(coinsCache.dirtyCoins, coinsCache.hashBlock)
-		return ok == nil
+		if ok == nil {
+			coinsCache.cacheCoins.Purge()
+		} else {
+			panic("CoinsLruCache.flush err:")
+		}
 	}
 	return true
-	//coinsCache.cacheCoins = make(CacheCoins)
 }
 
 //

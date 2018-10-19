@@ -34,9 +34,6 @@ func (s *Stack) Pop() interface{} {
 		return nil
 	}
 	e := s.array[stackLen-1]
-	if e == nil {
-		return nil
-	}
 	s.array = s.array[:stackLen-1]
 
 	return e
@@ -45,8 +42,11 @@ func (s *Stack) RemoveAt(index int) bool {
 	if index > s.Size()-1 || index < 0 {
 		return false
 	}
-	s.array = append(s.array[:index], s.array[index+1:])
-
+	if index < s.Size()-1 {
+		s.array = append(s.array[:index], s.array[index+1:]...)
+	} else {
+		s.array = s.array[:index]
+	}
 	return true
 }
 
@@ -56,7 +56,7 @@ func (s *Stack) Erase(begin int, end int) bool {
 		return false
 	}
 	for i := begin; i < end; i++ {
-		if !s.RemoveAt(i) {
+		if !s.RemoveAt(begin) {
 			return false
 		}
 	}
@@ -67,11 +67,12 @@ func (s *Stack) Insert(index int, value interface{}) bool {
 	if index > s.Size()-1 || index < 0 {
 		return false
 	}
-	lastArray := s.array[index+1:]
-	s.array = append(s.array[:index], value)
-	if len(lastArray) > 0 {
-		s.array = append(s.array, lastArray...)
-	}
+
+	lastArray := make([]interface{}, 0)
+	lastArray = append(lastArray, s.array[index:]...)
+	s.array = s.array[:index]
+	s.array = append(s.array, value)
+	s.array = append(s.array, lastArray...)
 	return true
 }
 
@@ -93,9 +94,9 @@ func (s *Stack) SetTop(i int, value interface{}) bool {
 }
 
 func (s *Stack) CountBool(val bool) int {
-	var count int = 0
+	var count int
 	for _, e := range s.array {
-		if e.(bool) == val {
+		if v, ok := e.(bool); ok && v == val {
 			count++
 		}
 	}
@@ -151,17 +152,17 @@ func NewStack() *Stack {
 //	}
 //}
 
-//func (s *Stack) Equal(other *Stack) bool {
-//	if s.Size() != other.Size() {
-//		return false
-//	}
-//	for i := 0; i < s.Size(); i++ {
-//		if s.array[i] != other.array[i] {
-//			return false
-//		}
-//	}
-//	return true
-//}
+func (s *Stack) Equal(other *Stack) bool {
+	if s.Size() != other.Size() {
+		return false
+	}
+	for i := 0; i < s.Size(); i++ {
+		if s.array[i] != other.array[i] {
+			return false
+		}
+	}
+	return true
+}
 
 //func (s *Stack) Last() interface{} {
 //	if s.Size() == 0 {

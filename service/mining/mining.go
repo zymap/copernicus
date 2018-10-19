@@ -5,18 +5,19 @@ import (
 	"encoding/binary"
 	"math"
 	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/copernet/copernicus/conf"
 	"github.com/copernet/copernicus/log"
-	"github.com/copernet/copernicus/logic/merkleroot"
-	tx2 "github.com/copernet/copernicus/logic/tx"
+	"github.com/copernet/copernicus/logic/lblock"
+	"github.com/copernet/copernicus/logic/ltx"
+	"github.com/copernet/copernicus/model"
 	"github.com/copernet/copernicus/model/block"
 	"github.com/copernet/copernicus/model/blockindex"
 	"github.com/copernet/copernicus/model/chain"
-	"github.com/copernet/copernicus/model/chainparams"
 	"github.com/copernet/copernicus/model/consensus"
 	"github.com/copernet/copernicus/model/mempool"
-	"github.com/copernet/copernicus/model/opcodes"
 	"github.com/copernet/copernicus/model/outpoint"
 	"github.com/copernet/copernicus/model/pow"
 	"github.com/copernet/copernicus/model/script"
@@ -26,6 +27,11 @@ import (
 	"github.com/copernet/copernicus/model/versionbits"
 	"github.com/copernet/copernicus/util"
 	"github.com/copernet/copernicus/util/amount"
+
+	"github.com/copernet/copernicus/logic/lblockindex"
+	"github.com/copernet/copernicus/logic/lchain"
+	"github.com/copernet/copernicus/model/utxo"
+	"github.com/copernet/copernicus/persist"
 	"github.com/google/btree"
 )
 
@@ -34,6 +40,7 @@ const (
 	// close to full; this is just a simple heuristic to finish quickly if the
 	// mempool has a lot of entries.
 	maxConsecutiveFailures = 1000
+	CoinbaseFlag           = ""
 )
 
 // global value for getmininginfo rpc use
@@ -66,6 +73,7 @@ func newBlockTemplate() *BlockTemplate {
 
 // BlockAssembler Generate a new block, without valid proof-of-work
 type BlockAssembler struct {
+	sync.RWMutex
 	bt                    *BlockTemplate
 	maxGeneratedBlockSize uint64
 	blockMinFeeRate       util.FeeRate
@@ -76,10 +84,10 @@ type BlockAssembler struct {
 	inBlock               map[util.Hash]struct{}
 	height                int32
 	lockTimeCutoff        int64
-	chainParams           *chainparams.BitcoinParams
+	chainParams           *model.BitcoinParams
 }
 
-func NewBlockAssembler(params *chainparams.BitcoinParams) *BlockAssembler {
+func NewBlockAssembler(params *model.BitcoinParams) *BlockAssembler {
 	ba := new(BlockAssembler)
 	ba.bt = newBlockTemplate()
 	ba.chainParams = params
@@ -148,13 +156,12 @@ func computeMaxGeneratedBlockSize() uint64 {
 func (ba *BlockAssembler) addPackageTxs() int {
 	descendantsUpdated := 0
 	pool := mempool.GetInstance() // todo use global variable
-	pool.RLock()
-	defer pool.RUnlock()
+	tmpStrategy := *getStrategy()
 
 	consecutiveFailed := 0
 
 	var txSet *btree.BTree
-	switch strategy {
+	switch tmpStrategy {
 	case sortByFee:
 		txSet = sortedByFeeWithAncestors()
 	case sortByFeeRate:
@@ -167,7 +174,7 @@ func (ba *BlockAssembler) addPackageTxs() int {
 		// select the max value item, and delete it. select strategy is descent.
 		var entry mempool.TxEntry
 
-		switch strategy {
+		switch tmpStrategy {
 		case sortByFee:
 			entry = mempool.TxEntry(txSet.Max().(EntryFeeSort))
 			txSet.DeleteMax()
@@ -184,13 +191,13 @@ func (ba *BlockAssembler) addPackageTxs() int {
 			continue
 		}
 
-		packageSize := entry.SumSizeWitAncestors
-		packageFee := entry.SumFeeWithAncestors
-		packageSigOps := entry.SumSigOpCountWithAncestors
+		packageSize := entry.SumTxSizeWitAncestors
+		packageFee := entry.SumTxFeeWithAncestors
+		packageSigOps := entry.SumTxSigOpCountWithAncestors
 
 		// deal with several different mining strategies
 		isEnd := false
-		switch strategy {
+		switch tmpStrategy {
 		case sortByFee:
 			// if the current fee lower than the specified min fee rate, stop loop directly.
 			// because the following after this item must be lower than this
@@ -218,7 +225,11 @@ func (ba *BlockAssembler) addPackageTxs() int {
 		}
 		// add the ancestors of the current item to block
 		noLimit := uint64(math.MaxUint64)
+
+		pool.RLock()
 		ancestors, _ := pool.CalculateMemPoolAncestors(entry.Tx, noLimit, noLimit, noLimit, noLimit, true)
+		pool.RUnlock()
+
 		ba.onlyUnconfirmed(ancestors)
 		ancestors[&entry] = struct{}{} // add current item
 		if !ba.testPackageTransactions(ancestors) {
@@ -238,20 +249,28 @@ func (ba *BlockAssembler) addPackageTxs() int {
 	return descendantsUpdated
 }
 
-func (ba *BlockAssembler) CreateNewBlock(coinbaseScript *script.Script) *BlockTemplate {
+func BasicScriptSig() *script.Script {
+	height := script.NewScriptNum(int64(chain.GetInstance().Tip().Height + 1))
+	scriptSig := script.NewEmptyScript()
+	scriptSig.PushScriptNum(height)
+	return scriptSig
+}
+
+func (ba *BlockAssembler) CreateNewBlock(scriptPubKey, scriptSig *script.Script) *BlockTemplate {
 	timeStart := util.GetMockTimeInMicros()
 
 	ba.resetBlockAssembler()
 
 	// add dummy coinbase tx as first transaction
 	ba.bt.Block.Txs = make([]*tx.Tx, 0, 100000)
-	ba.bt.Block.Txs = append(ba.bt.Block.Txs, tx.NewTx(0, 0x01)) // todo default version
+	ba.bt.Block.Txs = append(ba.bt.Block.Txs, tx.NewTx(0, tx.DefaultVersion))
 	ba.bt.TxFees = make([]amount.Amount, 0, 100000)
 	ba.bt.TxFees = append(ba.bt.TxFees, -1)
 	ba.bt.TxSigOpsCount = make([]int, 0, 100000)
 	ba.bt.TxSigOpsCount = append(ba.bt.TxSigOpsCount, -1)
 
-	// todo LOCK2(cs_main);
+	ba.Lock()
+	defer ba.Unlock()
 	indexPrev := chain.GetInstance().Tip()
 
 	// genesis block
@@ -260,7 +279,9 @@ func (ba *BlockAssembler) CreateNewBlock(coinbaseScript *script.Script) *BlockTe
 	} else {
 		ba.height = indexPrev.Height + 1
 	}
-	ba.bt.Block.Header.Version = int32(versionbits.ComputeBlockVersion(indexPrev, chainparams.ActiveNetParams, versionbits.VBCache)) // todo deal with nil param
+
+	blkVersion := versionbits.ComputeBlockVersion(indexPrev, model.ActiveNetParams, versionbits.VBCache)
+	ba.bt.Block.Header.Version = int32(blkVersion)
 	// -regtest only: allow overriding block.nVersion with
 	// -blockversion=N to test forking scenarios
 	if ba.chainParams.MineBlocksOnDemands {
@@ -270,14 +291,9 @@ func (ba *BlockAssembler) CreateNewBlock(coinbaseScript *script.Script) *BlockTe
 	}
 	ba.bt.Block.Header.Time = uint32(util.GetAdjustedTime())
 	ba.maxGeneratedBlockSize = computeMaxGeneratedBlockSize()
-	if tx.StandardLockTimeVerifyFlags&consensus.LocktimeMedianTimePast != 0 {
-		ba.lockTimeCutoff = indexPrev.GetMedianTimePast() // todo fix
-	} else {
-		ba.lockTimeCutoff = int64(ba.bt.Block.Header.Time)
-	}
+	ba.lockTimeCutoff = indexPrev.GetMedianTimePast()
 
 	descendantsUpdated := ba.addPackageTxs()
-
 	time1 := util.GetMockTimeInMicros()
 
 	// record last mining info for getmininginfo rpc using
@@ -285,16 +301,15 @@ func (ba *BlockAssembler) CreateNewBlock(coinbaseScript *script.Script) *BlockTe
 	lastBlockSize = ba.blockSize
 
 	// Create coinbase transaction
-	coinbaseTx := tx.NewTx(0, 0x01)
-	buf := bytes.NewBuffer(nil)
-	bs := make([]byte, 4)
-	binary.LittleEndian.PutUint64(bs, uint64(ba.height))
-	buf.Write([]byte{opcodes.OP_0})
-	coinbaseTx.AddTxIn(txin.NewTxIn(&outpoint.OutPoint{Hash: util.HashZero, Index: 0xffffffff}, script.NewScriptRaw(buf.Bytes()), 0xffffffff))
+	coinbaseTx := tx.NewTx(0, tx.DefaultVersion)
+
+	outPoint := outpoint.OutPoint{Hash: util.HashZero, Index: 0xffffffff}
+
+	coinbaseTx.AddTxIn(txin.NewTxIn(&outPoint, scriptSig, 0xffffffff))
 
 	// value represents total reward(fee and block generate reward)
 	value := ba.fees + GetBlockSubsidy(ba.height, ba.chainParams)
-	coinbaseTx.AddTxOut(txout.NewTxOut(amount.Amount(value), coinbaseScript))
+	coinbaseTx.AddTxOut(txout.NewTxOut(value, scriptPubKey))
 	ba.bt.Block.Txs[0] = coinbaseTx
 	ba.bt.TxFees[0] = -1 * ba.fees // coinbase's fee item is equal to tx fee sum for negative value
 
@@ -308,17 +323,18 @@ func (ba *BlockAssembler) CreateNewBlock(coinbaseScript *script.Script) *BlockTe
 	} else {
 		ba.bt.Block.Header.HashPrevBlock = *indexPrev.GetBlockHash()
 	}
-	UpdateTime(ba.bt.Block, indexPrev) // todo fix
+	UpdateTime(ba.bt.Block, indexPrev)
 	p := pow.Pow{}
 	ba.bt.Block.Header.Bits = p.GetNextWorkRequired(indexPrev, &ba.bt.Block.Header, ba.chainParams)
 	ba.bt.Block.Header.Nonce = 0
+
 	ba.bt.TxSigOpsCount[0] = ba.bt.Block.Txs[0].GetSigOpCountWithoutP2SH()
 
-	// state := block.ValidationState{}
-	// err := block2.Check(ba.bt.Block)
-	// if err != nil {
-	// 	panic(fmt.Sprintf("CreateNewBlock(): TestBlockValidity failed: %s", state.FormatStateMessage()))
-	// }
+	//check the validity of the block
+	if !TestBlockValidity(ba.bt.Block, indexPrev) {
+		log.Error("CreateNewBlock: TestBlockValidity failed.")
+		return nil
+	}
 
 	time2 := util.GetMockTimeInMicros()
 	log.Print("bench", "debug", "CreateNewBlock() packages: %.2fms (%d packages, %d "+
@@ -342,7 +358,7 @@ func (ba *BlockAssembler) onlyUnconfirmed(entrySet map[*mempool.TxEntry]struct{}
 func (ba *BlockAssembler) testPackageTransactions(entrySet map[*mempool.TxEntry]struct{}) bool {
 	potentialBlockSize := ba.blockSize
 	for entry := range entrySet {
-		err := tx2.ContextualCheckTransaction(entry.Tx, ba.height, ba.lockTimeCutoff)
+		err := ltx.ContextualCheckTransaction(entry.Tx, ba.height, ba.lockTimeCutoff)
 		if err != nil {
 			return false
 		}
@@ -359,8 +375,8 @@ func (ba *BlockAssembler) testPackageTransactions(entrySet map[*mempool.TxEntry]
 func (ba *BlockAssembler) updatePackagesForAdded(txSet *btree.BTree, alreadyAdded map[*mempool.TxEntry]struct{}) int {
 	descendantUpdate := 0
 	mpool := mempool.GetInstance()
-	mpool.Lock()
-	defer mpool.Unlock()
+	tmpStrategy := *getStrategy()
+
 	for entry := range alreadyAdded {
 		descendants := make(map[*mempool.TxEntry]struct{})
 		mpool.CalculateDescendants(entry, descendants)
@@ -368,15 +384,15 @@ func (ba *BlockAssembler) updatePackagesForAdded(txSet *btree.BTree, alreadyAdde
 		// use reflect function if there are so many strategies
 		for desc := range descendants {
 			descendantUpdate++
-			switch strategy {
+			switch tmpStrategy {
 			case sortByFee:
 				item := EntryFeeSort(*desc)
 				// remove the old one
 				txSet.Delete(item)
 				// update origin data
-				desc.SumSizeWitAncestors -= entry.SumSizeWitAncestors
-				desc.SumFeeWithAncestors -= entry.SumFeeWithAncestors
-				desc.SumSigOpCountWithAncestors -= entry.SumSigOpCountWithAncestors
+				desc.SumTxSizeWitAncestors -= entry.SumTxSizeWitAncestors
+				desc.SumTxFeeWithAncestors -= entry.SumTxFeeWithAncestors
+				desc.SumTxSigOpCountWithAncestors -= entry.SumTxSigOpCountWithAncestors
 				// insert the modified one
 				txSet.ReplaceOrInsert(item)
 			case sortByFeeRate:
@@ -384,9 +400,9 @@ func (ba *BlockAssembler) updatePackagesForAdded(txSet *btree.BTree, alreadyAdde
 				// remove the old one
 				txSet.Delete(item)
 				// update origin data
-				desc.SumSizeWitAncestors -= entry.SumSizeWitAncestors
-				desc.SumFeeWithAncestors -= entry.SumFeeWithAncestors
-				desc.SumSigOpCountWithAncestors -= entry.SumSigOpCountWithAncestors
+				desc.SumTxSizeWitAncestors -= entry.SumTxSizeWitAncestors
+				desc.SumTxFeeWithAncestors -= entry.SumTxFeeWithAncestors
+				desc.SumTxSigOpCountWithAncestors -= entry.SumTxSigOpCountWithAncestors
 				// insert the modified one
 				txSet.ReplaceOrInsert(item)
 			}
@@ -395,20 +411,25 @@ func (ba *BlockAssembler) updatePackagesForAdded(txSet *btree.BTree, alreadyAdde
 	return descendantUpdate
 }
 
-func IncrementExtraNonce(bk *block.Block, bindex *blockindex.BlockIndex) (extraNonce uint) {
-	// Update nExtraNonce
-	if bk.Header.HashPrevBlock != util.HashZero {
-		extraNonce = 0
-	}
-	extraNonce++
-	// Height first in coinbase required for block.version=2
-	height := bindex.Height + 1
-
-	// TODO lack of script builder to construct script conveniently<script>
+func CoinbaseScriptSig(extraNonce uint) *script.Script {
+	// TODO lack of lscript builder to construct script conveniently<lscript>
 	buf := bytes.NewBuffer(nil)
 	bytesEight := make([]byte, 8)
-	binary.LittleEndian.PutUint64(bytesEight, uint64(height))
+
+	height := uint64(chain.GetInstance().Tip().Height + 1)
+	binary.LittleEndian.PutUint64(bytesEight, height)
 	buf.Write(bytesEight)
+
+	///TODO: after add wallet,remove this. fill the sctiptSig in case generate same block
+	if model.ActiveNetParams.Name == model.RegressionNetParams.Name {
+		for _, str := range conf.Cfg.P2PNet.UserAgentComments {
+			if strings.Contains(str, "testnode") {
+				testnode, _ := strconv.Atoi(str[8:])
+				binary.LittleEndian.PutUint64(bytesEight, uint64(testnode))
+				buf.Write(bytesEight)
+			}
+		}
+	}
 
 	binary.LittleEndian.PutUint64(bytesEight, uint64(extraNonce))
 	buf.Write(bytesEight)
@@ -416,12 +437,7 @@ func IncrementExtraNonce(bk *block.Block, bindex *blockindex.BlockIndex) (extraN
 	buf.Write(getExcessiveBlockSizeSig())
 	buf.Write([]byte(CoinbaseFlag))
 
-	coinbaseScript := script.NewScriptRaw(buf.Bytes())
-	bk.Txs[0].GetIns()[0].SetScriptSig(coinbaseScript)
-
-	bk.Header.MerkleRoot = merkleroot.BlockMerkleRoot(bk, nil)
-
-	return extraNonce
+	return script.NewScriptRaw(buf.Bytes())
 }
 
 // This function convert MaxBlockSize from byte to
@@ -469,15 +485,15 @@ func UpdateTime(bk *block.Block, indexPrev *blockindex.BlockIndex) int64 {
 	}
 
 	// Updating time can change work required on testnet:
-	if chainparams.ActiveNetParams.FPowAllowMinDifficultyBlocks {
+	if model.ActiveNetParams.FPowAllowMinDifficultyBlocks {
 		p := pow.Pow{}
-		bk.Header.Bits = p.GetNextWorkRequired(indexPrev, &bk.Header, chainparams.ActiveNetParams)
+		bk.Header.Bits = p.GetNextWorkRequired(indexPrev, &bk.Header, model.ActiveNetParams)
 	}
 
 	return newTime - oldTime
 }
 
-func GetBlockSubsidy(height int32, params *chainparams.BitcoinParams) amount.Amount {
+func GetBlockSubsidy(height int32, params *model.BitcoinParams) amount.Amount {
 	halvings := height / params.SubsidyReductionInterval
 	// Force block reward to zero when right shift is undefined.
 	if halvings >= 64 {
@@ -488,4 +504,49 @@ func GetBlockSubsidy(height int32, params *chainparams.BitcoinParams) amount.Amo
 	// Subsidy is cut in half every 210,000 blocks which will occur
 	// approximately every 4 years.
 	return amount.Amount(uint(nSubsidy) >> uint(halvings))
+}
+
+func TestBlockValidity(block *block.Block, indexPrev *blockindex.BlockIndex) bool {
+	persist.CsMain.Lock()
+	defer persist.CsMain.Unlock()
+
+	if !(indexPrev != nil && indexPrev == chain.GetInstance().Tip()) {
+		log.Error("TestBlockValidity(): error")
+		return false
+	}
+
+	if !lblockindex.CheckIndexAgainstCheckpoint(indexPrev) {
+		log.Error("mining: CheckIndexAgainstCheckpoint() failed, please check.")
+		return false
+	}
+
+	coinMap := utxo.NewEmptyCoinsMap()
+	coinMap.GetMap()
+	blkHeader := block.GetBlockHeader()
+	indexDummy := blockindex.NewBlockIndex(&blkHeader)
+	indexDummy.Prev = indexPrev
+	indexDummy.Height = indexPrev.Height + 1
+
+	// NOTE: CheckBlockHeader is called by CheckBlock
+	if !lblock.ContextualCheckBlockHeader(&blkHeader, indexPrev, util.GetAdjustedTime()) {
+		log.Error("TestBlockValidity(): Consensus::ContextualCheckBlockHeader failed, please check.")
+		return false
+	}
+
+	if err := lblock.CheckBlock(block, false, false); err != nil {
+		log.Error("TestBlockValidity(): Consensus::CheckBlock failed: %v", err)
+		return false
+	}
+
+	if err := lblock.ContextualCheckBlock(block, indexPrev); err != nil {
+		log.Error("TestBlockValidity(): Consensus::ContextualCheckBlock failed: %v", err)
+		return false
+	}
+
+	if err := lchain.ConnectBlock(block, indexDummy, coinMap, true); err != nil {
+		log.Error("trying to connect to the block failed:%v", err)
+		return false
+	}
+
+	return true
 }

@@ -2,57 +2,37 @@ package service
 
 import (
 	"github.com/copernet/copernicus/errcode"
-	"github.com/copernet/copernicus/log"
-	lmempool "github.com/copernet/copernicus/logic/mempool"
-	ltx "github.com/copernet/copernicus/logic/tx"
+	"github.com/copernet/copernicus/logic/lmempool"
 	"github.com/copernet/copernicus/model/mempool"
 	"github.com/copernet/copernicus/model/tx"
 	"github.com/copernet/copernicus/util"
 )
 
-func ProcessTransaction(transaction *tx.Tx, nodeID int64) ([]*tx.Tx, []util.Hash, error) {
-	err := ltx.CheckRegularTransaction(transaction)
-	if err != nil {
-		return nil, nil, err
+func handleRejectedTx(txn *tx.Tx, err error, nodeID int64, recentRejects *map[util.Hash]struct{}) (missTxs []util.Hash, rejectTxs []util.Hash) {
+	missingInputs := errcode.IsErrorCode(err, errcode.TxErrNoPreviousOut)
+	isNormalOrphan := missingInputs && !txn.AnyInputTxIn(recentRejects)
+
+	if isNormalOrphan {
+		mempool.GetInstance().AddOrphanTx(txn, nodeID)
+		missTxs = txn.PrevoutHashs()
+		return
 	}
-	acceptTx := make([]*tx.Tx, 0)
-	missTx := make([]util.Hash, 0)
-	err = lmempool.AcceptTxToMemPool(transaction)
+
+	rejectTxs = append(rejectTxs, txn.GetHash())
+	return
+}
+
+func ProcessTransaction(txn *tx.Tx, recentRejects *map[util.Hash]struct{}, nodeID int64) ([]*tx.Tx, []util.Hash, []util.Hash, error) {
+	err := lmempool.AcceptTxToMemPool(txn)
 	if err == nil {
 		lmempool.CheckMempool()
-		acceptTx = append(acceptTx, transaction)
-		acc := lmempool.ProcessOrphan(transaction)
-		if len(acc) > 0 {
-			temAccept := make([]*tx.Tx, len(acc)+1)
-			temAccept[0] = transaction
-			copy(temAccept[1:], acc[:])
-			return temAccept, missTx, nil
-		}
-		return acceptTx, missTx, nil
+
+		acceptedOrphans, rejectTxs := lmempool.TryAcceptOrphansTxs(txn)
+
+		acceptedTxs := append([]*tx.Tx{txn}, acceptedOrphans...)
+		return acceptedTxs, nil, rejectTxs, nil
 	}
 
-	pool:= mempool.GetInstance()
-	if errcode.IsErrorCode(err, errcode.TxErrNoPreviousOut) {
-		fRejectedParents := false
-		for _, preOut := range transaction.GetAllPreviousOut() {
-			if _, ok := pool.RecentRejects[preOut.Hash]; ok {
-				fRejectedParents = true
-				break
-			}
-		}
-		if !fRejectedParents {
-			for _, preOut := range transaction.GetAllPreviousOut() {
-				missTx = append(missTx, preOut.Hash)
-			}
-			pool.AddOrphanTx(transaction, nodeID)
-		}
-		evicted := pool.LimitOrphanTx()
-		if evicted > 0 {
-			log.Print("service", "debug", "Orphan transaction "+
-				"overflow, removed %d tx", evicted)
-		}
-	}
-
-	pool.RecentRejects[transaction.GetHash()] = struct{}{}
-	return acceptTx, missTx, err
+	missTxs, rejectTxs := handleRejectedTx(txn, err, nodeID, recentRejects)
+	return nil, missTxs, rejectTxs, err
 }

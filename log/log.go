@@ -1,18 +1,15 @@
 package log
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 
+	"fmt"
 	"github.com/astaxie/beego/logs"
 	"github.com/copernet/copernicus/conf"
 )
 
 const (
-	defaultLogDirname = "logs"
-
+	DefaultLogDirname = "logs"
 	errModuleNotFound = "specified module not found"
 )
 
@@ -21,27 +18,28 @@ var mapModule map[string]struct{}
 func Print(module string, level string, format string, reason ...interface{}) {
 	level = strings.ToLower(level)
 	if isIncludeModule(module) {
+		format = fmt.Sprintf("module[%s]: level[%s]", module, level)
 		switch level {
 		case "emergency":
-			logs.Emergency(format, reason)
+			logs.Emergency(format, reason...)
 		case "alert":
-			logs.Alert(format, reason)
+			logs.Alert(format, reason...)
 		case "critical":
-			logs.Critical(format, reason)
+			logs.Critical(format, reason...)
 		case "error":
-			logs.Error(format, reason)
+			logs.Error(format, reason...)
 		case "warn":
-			logs.Warn(format, reason)
+			logs.Warn(format, reason...)
 		case "info":
-			logs.Info(format, reason)
+			logs.Info(format, reason...)
 		case "debug":
-			logs.Debug(format, reason)
+			logs.Debug(format, reason...)
 		case "notice":
-			logs.Notice(format, reason)
+			logs.Notice(format, reason...)
 		}
 	} else {
 		logs.GetLogger()
-		logs.Error(errModuleNotFound)
+		logs.Debug("module(%s): %v", module, errModuleNotFound)
 	}
 }
 
@@ -113,30 +111,8 @@ func GetLogger() *logs.BeeLogger {
 	return logs.GetBeeLogger()
 }
 
-func Init() {
-	logDir := filepath.Join(conf.Cfg.DataDir, defaultLogDirname)
-	if !conf.ExistDataDir(logDir) {
-		err := os.MkdirAll(logDir, os.ModePerm)
-		if err != nil {
-			panic("logdir create failed: " + err.Error())
-		}
-	}
-
-	logConf := struct {
-		FileName string `json:"filename"`
-		Level    int    `json:"level"`
-		Daily    bool   `json:"daily"`
-	}{
-		FileName: logDir + "/" + conf.Cfg.Log.FileName + ".log",
-		Level:    getLevel(conf.Cfg.Log.Level),
-		Daily:    false,
-	}
-
-	configuration, err := json.Marshal(logConf)
-	if err != nil {
-		panic(err)
-	}
-	logs.SetLogger(logs.AdapterFile, string(configuration))
+func Init(logConf string) {
+	logs.SetLogger(logs.AdapterFile, logConf)
 
 	// output filename and line number
 	logs.EnableFuncCallDepth(true)

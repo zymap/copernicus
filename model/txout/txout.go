@@ -1,14 +1,13 @@
 package txout
 
 import (
-	"encoding/hex"
-	"fmt"
 	"io"
 
 	"encoding/binary"
+	"encoding/hex"
+	"fmt"
 	"github.com/copernet/copernicus/conf"
 	"github.com/copernet/copernicus/errcode"
-	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/model/script"
 	"github.com/copernet/copernicus/util"
 	"github.com/copernet/copernicus/util/amount"
@@ -41,10 +40,9 @@ func (txOut *TxOut) Encode(writer io.Writer) error {
 		return err
 	}
 	if txOut.scriptPubKey == nil {
-		return util.BinarySerializer.PutUint64(writer, binary.LittleEndian, 0)
-	} else {
-		return txOut.scriptPubKey.Encode(writer)
+		return util.WriteVarInt(writer, 0)
 	}
+	return txOut.scriptPubKey.Encode(writer)
 }
 
 func (txOut *TxOut) Decode(reader io.Reader) error {
@@ -75,35 +73,45 @@ func (txOut *TxOut) GetDustThreshold(minRelayTxFee *util.FeeRate) int64 {
 		return 0
 	}
 	size := txOut.SerializeSize()
-	size += 32 + 4 + 1 + 107 + 4
+	size += 32 + 4 + 1 + 107 + 4 //=148
 	return 3 * minRelayTxFee.GetFee(int(size))
 }
 
-func (txOut *TxOut) CheckValue() error {
-	if !amount.MoneyRange(txOut.value) {
-		log.Warn("bad txout value :%d", txOut.value)
-		return errcode.New(errcode.TxErrRejectInvalid)
+func (txOut *TxOut) CheckValue() error { //3
+	if txOut.value < amount.Amount(0) {
+		return errcode.NewError(errcode.RejectInvalid, "bad-txns-vout-negative")
+	}
+
+	if txOut.value > amount.Amount(util.MaxMoney) {
+		return errcode.NewError(errcode.RejectInvalid, "bad-txns-vout-toolarge")
 	}
 
 	return nil
 }
 
-func (txOut *TxOut) CheckStandard() (pubKeyType int, err error) {
-	pubKeyType, _, err = txOut.scriptPubKey.CheckScriptPubKeyStandard()
-	if err != nil {
-		return
+func (txOut *TxOut) IsStandard() (pubKeyType int, isStandard bool) { //4
+	//var pubKeys [][]byte
+	pubKeyType, pubKeys, isStandard := txOut.scriptPubKey.IsStandardScriptPubKey()
+	if !isStandard {
+		return pubKeyType, false
 	}
-	if pubKeyType == script.ScriptNullData {
+	if pubKeyType == script.ScriptMultiSig {
+		opM := pubKeys[0][0]
+		opN := pubKeys[len(pubKeys)-1][0]
+		if opN < 1 || opN > 3 || opM < 1 || opM > opN {
+			return pubKeyType, false
+		}
+	} else if pubKeyType == script.ScriptNullData {
 		if !conf.Cfg.Script.AcceptDataCarrier || uint(txOut.scriptPubKey.Size()) > conf.Cfg.Script.MaxDatacarrierBytes {
-			return pubKeyType, errcode.New(errcode.ScriptErrNullData)
+			return pubKeyType, false
 		}
 	}
 
-	return
+	return pubKeyType, true
 }
 
-func (txOut *TxOut) GetPubKeyType() (pubKeyType int, err error) {
-	pubKeyType, _, err = txOut.scriptPubKey.CheckScriptPubKeyStandard()
+func (txOut *TxOut) GetPubKeyType() (pubKeyType int, isStandard bool) {
+	pubKeyType, _, isStandard = txOut.scriptPubKey.IsStandardScriptPubKey()
 	return
 }
 
@@ -124,18 +132,14 @@ func (txOut *TxOut) IsCommitment(data []byte) bool {
 	return txOut.scriptPubKey.IsCommitment(data)
 }
 
-/*
-  The TxOut can be spent or not according script, but don't care it is already been spent or not
-*/
-func (txOut *TxOut) IsSpendable() bool {
-	return txOut.scriptPubKey.IsSpendable()
-}
+// IsSpendable returns whether the TxOut can be spent or not,
+// but doesn't care whether it has already been spent or not
 
-/*
-  The TxOut already spent
-*/
-func (txOut *TxOut) IsSpent() bool {
-	return true
+func (txOut *TxOut) IsSpendable() bool {
+	if txOut == nil || txOut.scriptPubKey == nil {
+		return false
+	}
+	return txOut.scriptPubKey.IsSpendable()
 }
 
 func (txOut *TxOut) SetNull() {
@@ -144,7 +148,7 @@ func (txOut *TxOut) SetNull() {
 }
 
 func (txOut *TxOut) IsNull() bool {
-	return txOut.value == -1
+	return txOut.value == -1 //&& txOut.scriptPubKey == nil
 }
 func (txOut *TxOut) String() string {
 	return fmt.Sprintf("Value :%d Script:%s", txOut.value, hex.EncodeToString(txOut.scriptPubKey.GetData()))
@@ -161,7 +165,11 @@ func (txOut *TxOut) IsEqual(out *TxOut) bool {
 func NewTxOut(value amount.Amount, scriptPubKey *script.Script) *TxOut {
 	txOut := TxOut{
 		value:        value,
-		scriptPubKey: scriptPubKey,
+		scriptPubKey: nil,
 	}
+	if scriptPubKey != nil {
+		txOut.scriptPubKey = script.NewScriptRaw(scriptPubKey.GetData())
+	}
+
 	return &txOut
 }

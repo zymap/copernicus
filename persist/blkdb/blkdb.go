@@ -2,17 +2,14 @@ package blkdb
 
 import (
 	"bytes"
-	"fmt"
-
-	"github.com/copernet/copernicus/conf"
 	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/model/blockindex"
 	"github.com/copernet/copernicus/persist/db"
 	"github.com/syndtr/goleveldb/leveldb"
 
-	"github.com/astaxie/beego/logs"
+	"encoding/hex"
+	"github.com/copernet/copernicus/model"
 	"github.com/copernet/copernicus/model/block"
-	"github.com/copernet/copernicus/model/chainparams"
 	"github.com/copernet/copernicus/model/pow"
 	"github.com/copernet/copernicus/util"
 )
@@ -21,16 +18,14 @@ type BlockTreeDB struct {
 	dbw *db.DBWrapper
 }
 
-var blockTreeDb *BlockTreeDB = nil
+var blockTreeDb *BlockTreeDB
 
 type BlockTreeDBConfig struct {
 	Do *db.DBOption
 }
 
-func InitBlockTreDB(uc *BlockTreeDBConfig) {
-	// fmt.Printf("InitBlockTreDB processing ....%v",uc)
-	blockTreeDb = NewBlockTreeDB(uc.Do)
-
+func InitBlockTreeDB(uc *BlockTreeDBConfig) {
+	blockTreeDb = newBlockTreeDB(uc.Do)
 }
 
 func GetInstance() *BlockTreeDB {
@@ -39,17 +34,14 @@ func GetInstance() *BlockTreeDB {
 	}
 	return blockTreeDb
 }
-func NewBlockTreeDB(do *db.DBOption) *BlockTreeDB {
+
+func newBlockTreeDB(do *db.DBOption) *BlockTreeDB {
 	if do == nil {
 		return nil
 	}
-	dbw, err := db.NewDBWrapper(&db.DBOption{
-		FilePath:  conf.GetDataPath() + "/blocks/index",
-		CacheSize: do.CacheSize,
-		Wipe:      false,
-	})
+	dbw, err := db.NewDBWrapper(do)
 	if err != nil {
-		panic("init DBWrapper failed...")
+		panic("init DBWrapper failed..." + err.Error())
 	}
 	return &BlockTreeDB{
 		dbw: dbw,
@@ -57,18 +49,23 @@ func NewBlockTreeDB(do *db.DBOption) *BlockTreeDB {
 }
 
 func (blockTreeDB *BlockTreeDB) ReadBlockFileInfo(file int32) (*block.BlockFileInfo, error) {
-	log.Debug("file======%#v", file)
 	keyBuf := bytes.NewBuffer(nil)
-	keyBuf.Write([]byte{db.DbBlockFiles})
-	util.WriteElements(keyBuf, uint64(file))
+	_, err := keyBuf.Write([]byte{db.DbBlockFiles})
+	if err != nil {
+		log.Error("blkDB:write DbBlockFiles flag failed<%v>, please check.", err)
+		return nil, err
+	}
+	err = util.WriteElements(keyBuf, uint64(file))
+	if err != nil {
+		log.Error("blkDB:write key[DbBlockFiles+file] failed:%v", err)
+		return nil, err
+	}
 	vbytes, err := blockTreeDB.dbw.Read(keyBuf.Bytes())
 	if err == leveldb.ErrNotFound {
-		return nil, nil
+		return nil, err
 	}
-	log.Debug("file======%#v", file)
 
 	if err != nil {
-		fmt.Println("ReadBlockFileInfo err: %#v", err.Error())
 		log.Error("ReadBlockFileInfo err: %#v", err.Error())
 		panic("read failed ....")
 	}
@@ -96,66 +93,70 @@ func (blockTreeDB *BlockTreeDB) ReadLastBlockFile() (int32, error) {
 		return 0, err
 	}
 	buf := bytes.NewBuffer(data)
-	var lastFile int32 = 0
+	var lastFile int32
 	err = util.ReadElements(buf, &lastFile)
 	return lastFile, err
 }
 
-func (blockTreeDB *BlockTreeDB) WriteMaxBlockFile(file int) error {
-	vbuf := bytes.NewBuffer(nil)
-	util.WriteElements(vbuf, uint64(file))
-	return blockTreeDB.dbw.Write([]byte{db.DbMaxBlock}, vbuf.Bytes(), false)
-}
-
-func (blockTreeDB *BlockTreeDB) ReadMaxBlockFile() (int, error) {
-	data, err := blockTreeDB.dbw.Read([]byte{db.DbMaxBlock})
-	if err != nil {
-		return -2, err
-	}
-	buf := bytes.NewBuffer(data)
-	var lastFile int = -2
-	err = util.ReadElements(buf, &lastFile)
-	return lastFile, err
-}
-
-func (blockTreeDB *BlockTreeDB) WriteBatchSync(fileInfoList []*block.BlockFileInfo, lastFile int, blockIndexes []*blockindex.BlockIndex) error {
+func (blockTreeDB *BlockTreeDB) WriteBatchSync(fileInfoList map[int32]*block.BlockFileInfo, lastFile int,
+	blockIndexes []*blockindex.BlockIndex) error {
 	batch := db.NewBatchWrapper(blockTreeDB.dbw)
 	keytmp := make([]byte, 0, 100)
 	valuetmp := make([]byte, 0, 100)
 	keyBuf := bytes.NewBuffer(keytmp)
 	valueBuf := bytes.NewBuffer(valuetmp)
 
-	for _, v := range fileInfoList {
+	for fileNum, v := range fileInfoList {
 		keyBuf.Reset()
 		valueBuf.Reset()
-		keyBuf.Write([]byte{db.DbBlockFiles})
-		util.WriteElements(keyBuf, uint64(v.GetIndex()))
-		if err := v.Serialize(valueBuf); err != nil {
+		_, err := keyBuf.Write([]byte{db.DbBlockFiles})
+		if err != nil {
+			log.Error("blkDB->WriteBatchSync:write DbBlockFiles failed:%v", err)
+			return err
+		}
+		err = util.WriteElements(keyBuf, uint64(fileNum))
+		if err != nil {
+			log.Error("blkDB:write key(DbBlockFiles(f)+lastFile) failed:%v", err)
+			return err
+		}
+		if err = v.Serialize(valueBuf); err != nil {
 			return err
 		}
 		batch.Write(keyBuf.Bytes(), valueBuf.Bytes())
-
+		log.Debug("blkDB: write block file info: %d, key: %s, %v", fileNum, hex.EncodeToString(keyBuf.Bytes()), v)
 	}
 	valueBuf.Reset()
-	util.WriteElements(valueBuf, uint64(lastFile))
+	err := util.WriteElements(valueBuf, uint64(lastFile))
+	if err != nil {
+		log.Error("blkDB:write value failed:%v", err)
+		return err
+	}
 	batch.Write([]byte{db.DbLastBlock}, valueBuf.Bytes())
+	log.Debug("blkDB: write lastFile: %d, key: %s", lastFile, hex.EncodeToString([]byte{db.DbLastBlock}))
 
 	for _, v := range blockIndexes {
 		keyBuf.Reset()
 		valueBuf.Reset()
-		keyBuf.Write([]byte{db.DbBlockIndex})
-		v.GetBlockHash().Serialize(keyBuf)
+		_, err = keyBuf.Write([]byte{db.DbBlockIndex})
+		if err != nil {
+			log.Error("blkDB: write DbBlockIndex failed:%v", err)
+			return err
+		}
+		_, err = v.GetBlockHash().Serialize(keyBuf)
+		if err != nil {
+			log.Error("blkDB: Serialize keyBuf failed:%v", err)
+			return err
+		}
 		if err := v.Serialize(valueBuf); err != nil {
 			return err
 		}
 		batch.Write(keyBuf.Bytes(), valueBuf.Bytes())
 	}
 
-	err := blockTreeDB.dbw.WriteBatch(batch, true)
-	if true && err !=nil{
-		lastFile, e := blockTreeDB.ReadLastBlockFile()
-		fmt.Println(lastFile,e)
-		
+	err = blockTreeDB.dbw.WriteBatch(batch, true)
+	if err != nil {
+		log.Error("blkDB: sync to DB error: %v", err)
+		panic("blkDB: sync to DB error")
 	}
 	return err
 }
@@ -168,7 +169,6 @@ func (blockTreeDB *BlockTreeDB) ReadTxIndex(txid *util.Hash) (*block.DiskTxPos, 
 	if err != nil {
 		log.Error("Error: ReadTxIndex======%#v", err)
 		panic("Error: ReadTxIndex======")
-		return nil, err
 	}
 	if vdata == nil {
 		return nil, nil
@@ -176,7 +176,6 @@ func (blockTreeDB *BlockTreeDB) ReadTxIndex(txid *util.Hash) (*block.DiskTxPos, 
 	dtp := block.NewDiskTxPos(nil, 0)
 	err = dtp.Unserialize(bytes.NewBuffer(vdata))
 	return dtp, err
-
 }
 
 func (blockTreeDB *BlockTreeDB) WriteTxIndex(txIndexes map[util.Hash]block.DiskTxPos) error {
@@ -188,8 +187,16 @@ func (blockTreeDB *BlockTreeDB) WriteTxIndex(txIndexes map[util.Hash]block.DiskT
 	for k, v := range txIndexes {
 		keyBuf.Reset()
 		valueBuf.Reset()
-		keyBuf.Write([]byte{db.DbTxIndex})
-		keyBuf.Write(k[:])
+		_, err := keyBuf.Write([]byte{db.DbTxIndex})
+		if err != nil {
+			log.Error("blkDB: write DbTxIndex flag failed:%v", err)
+			return err
+		}
+		_, err = keyBuf.Write(k[:])
+		if err != nil {
+			log.Error("blkDB: write k failed:%v", err)
+			return err
+		}
 		if err := v.Serialize(valueBuf); err != nil {
 			return err
 		}
@@ -220,11 +227,10 @@ func (blockTreeDB *BlockTreeDB) ReadFlag(name string) bool {
 	return false
 }
 
-//
-
-// todo for iter and check key、 pow
-func (blockTreeDB *BlockTreeDB) LoadBlockIndexGuts(GlobalBlockIndexMap map[util.Hash]*blockindex.BlockIndex, params *chainparams.BitcoinParams) bool {
-	cursor := blockTreeDB.dbw.Iterator()
+func (blockTreeDB *BlockTreeDB) LoadBlockIndexGuts(blkIdxMap map[util.Hash]*blockindex.BlockIndex,
+	params *model.BitcoinParams) bool {
+	// todo for iter and check key、 pow
+	cursor := blockTreeDB.dbw.Iterator(nil)
 	defer cursor.Close()
 	hash := util.Hash{}
 	tmp := make([]byte, 0, 100)
@@ -242,22 +248,31 @@ func (blockTreeDB *BlockTreeDB) LoadBlockIndexGuts(GlobalBlockIndexMap map[util.
 		var bi = blockindex.NewBlockIndex(block.NewBlockHeader())
 		val := cursor.GetVal()
 		if val == nil {
-			logs.Error("LoadBlockIndex() : failed to read value")
+			log.Error("LoadBlockIndex() : failed to read value")
 			return false
 		}
-		bi.Unserialize(bytes.NewBuffer(val))
-		if bi.TxCount == 0{
-			fmt.Println("err")
-			blockTreeDB.dbw.Erase(k, true)
+
+		if err := bi.Unserialize(bytes.NewBuffer(val)); err != nil {
+			log.Error("LoadBlockIndexGuts: BlockIndex unserializa err:%v", err)
+			return false
+		}
+
+		if bi.TxCount == 0 {
+			err := blockTreeDB.dbw.Erase(k, true)
+			if err != nil {
+				log.Error("LoadBlockIndexGuts: BlockIndex erase err:%v", err)
+				return false
+			}
 			cursor.Next()
 			continue
 		}
-		newIndex := InsertBlockIndex(*bi.GetBlockHash(), GlobalBlockIndexMap)
-		if newIndex == nil{
+		newIndex := insertBlockIndex(*bi.GetBlockHash(), blkIdxMap)
+		if newIndex == nil {
 			cursor.Next()
 			continue
 		}
-		pre := InsertBlockIndex(bi.Header.HashPrevBlock, GlobalBlockIndexMap)
+		//???
+		pre := insertBlockIndex(bi.Header.HashPrevBlock, blkIdxMap)
 		newIndex.Prev = pre
 		newIndex.SetBlockHash(*bi.GetBlockHash())
 		newIndex.Height = bi.Height
@@ -272,9 +287,9 @@ func (blockTreeDB *BlockTreeDB) LoadBlockIndexGuts(GlobalBlockIndexMap map[util.
 		newIndex.Header.Nonce = bi.Header.Nonce
 		newIndex.Status = bi.Status
 		newIndex.TxCount = bi.TxCount
-		
+
 		if !new(pow.Pow).CheckProofOfWork(bi.GetBlockHash(), bi.Header.Bits, params) {
-			logs.Error("LoadBlockIndex(): CheckProofOfWork failed: %s", bi.String())
+			log.Error("LoadBlockIndex(): CheckProofOfWork failed: %s", bi.String())
 			return false
 		}
 		cursor.Next()
@@ -282,18 +297,15 @@ func (blockTreeDB *BlockTreeDB) LoadBlockIndexGuts(GlobalBlockIndexMap map[util.
 	return true
 }
 
-func InsertBlockIndex(hash util.Hash, GlobalBlockIndexMap map[util.Hash]*blockindex.BlockIndex) *blockindex.BlockIndex {
-
-	if i, ok := GlobalBlockIndexMap[hash]; ok {
+func insertBlockIndex(hash util.Hash, blkIdxMap map[util.Hash]*blockindex.BlockIndex) *blockindex.BlockIndex {
+	if i, ok := blkIdxMap[hash]; ok {
 		return i
 	}
-	if hash.IsNull(){
+	if hash.IsNull() {
 		return nil
 	}
 	var bi = blockindex.NewBlockIndex(block.NewBlockHeader())
-
-	GlobalBlockIndexMap[hash] = bi
+	blkIdxMap[hash] = bi
 
 	return bi
-
 }

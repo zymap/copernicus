@@ -5,36 +5,65 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
+	"strconv"
+	"strings"
 
 	"github.com/copernet/copernicus/conf"
 	"github.com/copernet/copernicus/crypto"
+	"github.com/copernet/copernicus/model"
 	"github.com/copernet/copernicus/model/chain"
-	"github.com/copernet/copernicus/model/chainparams"
 	"github.com/copernet/copernicus/model/script"
+	"github.com/copernet/copernicus/net/server"
 	"github.com/copernet/copernicus/net/wire"
 	"github.com/copernet/copernicus/rpc/btcjson"
+	"github.com/copernet/copernicus/service"
 	"github.com/copernet/copernicus/util"
 	"github.com/copernet/copernicus/util/base58"
 )
 
-var miscHandlers = map[string]commandHandler{
-	"getinfo":                handleGetInfo,         // complete
-	"validateaddress":        handleValidateAddress, // complete
-	"createmultisig":         handleCreatemultisig,
-	"verifymessage":          handleVerifyMessage,          // complete
-	"signmessagewithprivkey": handleSignMessageWithPrivkey, // complete
-	"setmocktime":            handleSetMocktime,            // complete
-	"echo":                   handleEcho,                   // complete
-	"help":                   handleHelp,                   // complete
-	"stop":                   handleStop,                   // complete
-}
+// API version constants
+const (
+	jsonrpcSemverString = "1.0.0"
+	jsonrpcSemverMajor  = 1
+	jsonrpcSemverMinor  = 1
+	jsonrpcSemverPatch  = 0
+)
 
+var miscHandlers = map[string]commandHandler{
+	"getinfo":                handleGetInfo,
+	"validateaddress":        handleValidateAddress,
+	"createmultisig":         handleCreatemultisig,
+	"verifymessage":          handleVerifyMessage,
+	"signmessagewithprivkey": handleSignMessageWithPrivkey,
+	"setmocktime":            handleSetMocktime,
+	"echo":                   handleEcho,
+	"help":                   handleHelp,
+	"stop":                   handleStop,
+	"version":                handleVersion,
+}
 
 func handleGetInfo(s *Server, cmd interface{}, closeChan <-chan struct{}) (interface{}, error) {
 	best := chain.GetInstance().Tip()
 	var height int32
-	if best == nil {
-		height = 0
+	if best != nil {
+		height = best.Height
+	}
+
+	request := &service.GetConnectionCountRequest{}
+	response, err := server.ProcessForRPC(request)
+	if err != nil {
+		return nil, btcjson.RPCError{
+			Code:    btcjson.RPCInternalError,
+			Message: "Can not acquire connection count",
+		}
+	}
+	count, ok := response.(*service.GetConnectionCountResponse)
+	if !ok {
+		return nil, btcjson.RPCError{
+			Code:    btcjson.RPCInternalError,
+			Message: "Server handle error",
+		}
 	}
 
 	ret := &btcjson.InfoChainResult{
@@ -42,11 +71,11 @@ func handleGetInfo(s *Server, cmd interface{}, closeChan <-chan struct{}) (inter
 		ProtocolVersion: int32(wire.ProtocolVersion),
 		Blocks:          height,
 		TimeOffset:      util.GetTimeOffset(),
-		//Connections: s.cfg.ConnMgr.ConnectedCount(),		// todo open
-		Proxy:      "", // todo define in conf
-		Difficulty: getDifficulty(chain.GetInstance().Tip()),
-		TestNet:    chainparams.ActiveNetParams.BitcoinNet == wire.TestNet3,
-		RelayFee:   0, // todo define DefaultMinRelayTxFee
+		Connections:     int32(count.Count),
+		Proxy:           conf.Cfg.P2PNet.Proxy,
+		Difficulty:      getDifficulty(chain.GetInstance().Tip()),
+		TestNet:         model.ActiveNetParams.BitcoinNet == wire.TestNet3,
+		RelayFee:        0, // todo define DefaultMinRelayTxFee
 	}
 
 	return ret, nil
@@ -156,27 +185,54 @@ func handleSignMessageWithPrivkey(s *Server, cmd interface{}, closeChan <-chan s
 }
 
 func handleSetMocktime(s *Server, cmd interface{}, closeChan <-chan struct{}) (interface{}, error) {
-	/*	c := cmd.(*btcjson.SetMocktimeCmd)
+	c := cmd.(*btcjson.SetMocktimeCmd)
 
-		if !consensus.ActiveNetParams.MineBlocksOnDemands {
-			return nil, btcjson.RPCError{
-				Code:    btcjson.RPCForbiddenBySafeMode,
-				Message: "etmocktime for regression testing (-regtest mode) only",
-			}
+	if !model.ActiveNetParams.MineBlocksOnDemands {
+		return nil, btcjson.RPCError{
+			Code:    btcjson.RPCForbiddenBySafeMode,
+			Message: "etmocktime for regression testing (-regtest mode) only",
 		}
+	}
 
-		// For now, don't change mocktime if we're in the middle of validation, as
-		// this could have an effect on mempool time-based eviction, as well as
-		// IsCurrentForFeeEstimation() and IsInitialBlockDownload().
-		// TODO: figure out the right way to synchronize around mocktime, and
-		// ensure all callsites of GetTime() are accessing this safely.
-		util.SetMockTime(c.Timestamp)*/ // todo open
+	// For now, don't change mocktime if we're in the middle of validation, as
+	// this could have an effect on mempool time-based eviction, as well as
+	// IsCurrentForFeeEstimation() and IsInitialBlockDownload().
+	// figure out the right way to synchronize around mocktime, and
+	// ensure all callsites of GetTime() are accessing this safely.
+	util.SetMockTime(c.Timestamp)
 
 	return nil, nil
 }
 
 func handleEcho(s *Server, cmd interface{}, closeChan <-chan struct{}) (interface{}, error) {
-	return cmd, nil
+	const echoArgPrefix = "arg"
+	if _, ok := cmd.(*map[string]json.RawMessage); !ok {
+		return cmd, nil
+	}
+	// JSON format
+	params := cmd.(*map[string]json.RawMessage)
+	retLen := 0
+	args := make(map[int]interface{})
+	for argName, arg := range *params {
+		if !strings.HasPrefix(strings.ToLower(argName), echoArgPrefix) {
+			return nil, btcjson.RPCError{
+				Code:    btcjson.ErrRPCInvalidParameter,
+				Message: "Unknown named parameter " + argName,
+			}
+		}
+		argIdx := argName[len(echoArgPrefix):]
+		if index, err := strconv.Atoi(argIdx); err == nil {
+			args[index] = arg
+			if index >= retLen {
+				retLen = index + 1
+			}
+		}
+	}
+	result := make([]interface{}, retLen)
+	for index, arg := range args {
+		result[index] = arg
+	}
+	return result, nil
 }
 
 // handleHelp implements the help command.
@@ -217,6 +273,18 @@ func handleStop(s *Server, cmd interface{}, closeChan <-chan struct{}) (interfac
 	default:
 	}
 	return "Copernicus server stopping", nil
+}
+
+func handleVersion(s *Server, cmd interface{}, closeChan <-chan struct{}) (interface{}, error) {
+	result := map[string]btcjson.VersionResult{
+		"btcdjsonrpcapi": {
+			VersionString: jsonrpcSemverString,
+			Major:         jsonrpcSemverMajor,
+			Minor:         jsonrpcSemverMinor,
+			Patch:         jsonrpcSemverPatch,
+		},
+	}
+	return result, nil
 }
 
 func registerMiscRPCCommands() {

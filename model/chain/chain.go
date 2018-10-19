@@ -1,20 +1,24 @@
 package chain
 
 import (
-	"fmt"
+	"github.com/copernet/copernicus/model"
 	"sort"
-	
+	"sync"
+	"time"
+
+	"errors"
 	"github.com/copernet/copernicus/conf"
+	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/model/blockindex"
-	"github.com/copernet/copernicus/model/chainparams"
+
 	"github.com/copernet/copernicus/model/consensus"
 	"github.com/copernet/copernicus/model/pow"
 	"github.com/copernet/copernicus/model/script"
 	"github.com/copernet/copernicus/model/versionbits"
-	"github.com/copernet/copernicus/persist/global"
+	"github.com/copernet/copernicus/persist"
 	"github.com/copernet/copernicus/util"
 	"gopkg.in/eapache/queue.v1"
-	"github.com/copernet/copernicus/log"
+	"gopkg.in/fatih/set.v0"
 )
 
 // Chain An in-memory blIndexed chain of blocks.
@@ -22,40 +26,61 @@ type Chain struct {
 	active      []*blockindex.BlockIndex
 	branch      []*blockindex.BlockIndex
 	waitForTx   map[util.Hash]*blockindex.BlockIndex
-	orphan      map[util.Hash][]*blockindex.BlockIndex  // preHash : *index
-	indexMap    map[util.Hash]*blockindex.BlockIndex  // selfHash :*index
+	orphan      map[util.Hash][]*blockindex.BlockIndex // preHash : *index
+	indexMap    map[util.Hash]*blockindex.BlockIndex   // selfHash :*index
 	newestBlock *blockindex.BlockIndex
 	receiveID   uint64
-	params      *chainparams.BitcoinParams
+	params      *model.BitcoinParams
+
+	// The notifications field stores a slice of callbacks to be executed on
+	// certain blockchain events.
+	notificationsLock sync.RWMutex
+	notifications     []NotificationCallback
+
+	*SyncingState
 }
 
 var globalChain *Chain
+var HashAssumeValid util.Hash
 
 func GetInstance() *Chain {
 	if globalChain == nil {
 		panic("globalChain do not init")
 	}
-	// fmt.Println("gchain======%#v", globalChain)
 	return globalChain
 }
 
-func InitGlobalChain(cfg *conf.Configuration){
+func InitGlobalChain() {
 	if globalChain == nil {
 		globalChain = NewChain()
-		globalChain.params = chainparams.ActiveNetParams
+	}
+	if len(conf.Cfg.Chain.AssumeValid) > 0 {
+		hash, err := util.GetHashFromStr(conf.Cfg.Chain.AssumeValid)
+		if err != nil {
+			panic("AssumeValid config err")
+		}
+		HashAssumeValid = *hash
+	} else {
+		HashAssumeValid = model.ActiveNetParams.DefaultAssumeValid
 	}
 }
-func NewChain() *Chain {
 
-	// return NewFakeChain()
-	return &Chain{}
+func NewChain() *Chain {
+	c := &Chain{}
+	c.params = model.ActiveNetParams
+	c.orphan = make(map[util.Hash][]*blockindex.BlockIndex)
+	c.SyncingState = &SyncingState{}
+	return c
 }
-func (c *Chain)GetParams() *chainparams.BitcoinParams {
+
+func (c *Chain) GetParams() *model.BitcoinParams {
 	return c.params
 }
-func (c *Chain)InitLoad(indexMap map[util.Hash]*blockindex.BlockIndex, branch  []*blockindex.BlockIndex){
+
+//InitLoad load the maps of the chain
+func (c *Chain) InitLoad(indexMap map[util.Hash]*blockindex.BlockIndex, branch []*blockindex.BlockIndex) {
 	c.indexMap = indexMap
-	c.branch =  branch
+	c.branch = branch
 }
 
 // Genesis Returns the blIndex entry for the genesis block of this chain,
@@ -68,36 +93,59 @@ func (c *Chain) Genesis() *blockindex.BlockIndex {
 	return nil
 }
 
-func (c *Chain) AddReceivedID(){
-	c.receiveID += 1
-}
-func (c *Chain) GetReceivedID() uint64{
-	return c.receiveID
+func (c *Chain) GetReceivedID() uint64 {
+	c.receiveID++
+	return c.receiveID - 1
 }
 
-//find blockindex from active
+// FindHashInActive finds blockindex from active
 func (c *Chain) FindHashInActive(hash util.Hash) *blockindex.BlockIndex {
 	bi, ok := c.indexMap[hash]
 	if ok {
-		if c.Contains(bi){
+		if c.Contains(bi) {
 			return bi
 		}
 		return nil
 	}
-	
+
 	return nil
 }
 
-//find blockindex from blockIndexMap
+// FindBlockIndex finds blockindex from blockIndexMap
 func (c *Chain) FindBlockIndex(hash util.Hash) *blockindex.BlockIndex {
-	fmt.Println("FindBlockIndex======", len(c.indexMap))
 	bi, ok := c.indexMap[hash]
 	if ok {
-		log.Trace("current chain Tip header height : %d", bi.Height)
+		//log.Trace("current chain Tip header height : %d", bi.Height)
 		return bi
 	}
 
 	return nil
+}
+
+// GetChainTips Returns fork tip, no activate chain tip
+func (c *Chain) GetChainTips() *set.Set {
+	setTips := set.New() // element type:
+	setOrphans := set.New()
+	setPrevs := set.New()
+
+	gchain := GetInstance()
+	setTips.Add(gchain.Tip())
+	for _, index := range gchain.indexMap {
+		if !gchain.Contains(index) {
+			setOrphans.Add(index)
+			setPrevs.Add(index.Prev)
+		}
+	}
+
+	setOrphans.Each(func(item interface{}) bool {
+		bindex := item.(*blockindex.BlockIndex)
+		if !setPrevs.Has(bindex) {
+			setTips.Add(bindex)
+		}
+		return true
+	})
+
+	return setTips
 }
 
 // Tip Returns the blIndex entry for the tip of this chain, or nullptr if none.
@@ -117,63 +165,111 @@ func (c *Chain) TipHeight() int32 {
 	return 0
 }
 
-func (c *Chain) GetSpendHeight(hash *util.Hash) int32{
-	index, _ := c.indexMap[*hash]
-	return index.Height + 1
+// IsCurrent returns whether or not the chain believes it is current.  Several
+// factors are used to guess, but the key factors that allow the chain to
+// believe it is current are:
+//  - Latest block height is after the latest checkpoint (if enabled)
+//  - Latest block has a timestamp newer than 24 hours ago
+func (c *Chain) IsCurrent() bool {
+	// Not current if the latest main (best) chain height is before the
+	// latest known good checkpoint (when checkpoints are enabled).
+	//TODO: checkpoint
+	//checkpoint := b.LatestCheckpoint()
+	//if checkpoint != nil && b.bestChain.Tip().height < checkpoint.Height {
+	//	return false
+	//}
+
+	// Not current if the latest best block has a timestamp before 24 hours ago.
+	minus24Hours := time.Now().Add(-24 * time.Hour).Unix()
+	tipTime := int64(c.Tip().GetBlockTime())
+
+	return tipTime >= minus24Hours
 }
 
+func (c *Chain) GetSpendHeight(hash *util.Hash) int32 {
+	index, ok := c.indexMap[*hash]
+	if ok {
+		return index.Height + 1
+	}
+
+	return -1
+}
 
 func (c *Chain) GetBlockScriptFlags(pindex *blockindex.BlockIndex) uint32 {
 	// TODO: AssertLockHeld(cs_main);
 	// var sc sync.RWMutex
 	// sc.Lock()
 	// defer sc.Unlock()
-	
+
 	// BIP16 didn't become active until Apr 1 2012
-	nBIP16SwitchTime := 1333238400
-	fStrictPayToScriptHash := int(pindex.GetBlockTime()) >= nBIP16SwitchTime
-	param := c.params
+	/** Activation time for P2SH (April 1st 2012) */
 	var flags uint32
-	
-	if fStrictPayToScriptHash {
+	P2SHActivationTime := 1333234914
+	//nBIP16SwitchTime := 1333238400
+	if pindex.GetMedianTimePast() >= int64(P2SHActivationTime) {
 		flags = script.ScriptVerifyP2SH
 	} else {
 		flags = script.ScriptVerifyNone
 	}
-	
+	//fStrictPayToScriptHash := int(pindex.GetBlockTime()) >= nBIP16SwitchTime
+	param := c.params
 	// Start enforcing the DERSIG (BIP66) rule
-	if pindex.Height >= param.BIP66Height {
+
+	if pindex.Height+1 >= param.BIP66Height {
 		flags |= script.ScriptVerifyDersig
 	}
-	
+
 	// Start enforcing CHECKLOCKTIMEVERIFY (BIP65) rule
-	if pindex.Height >= param.BIP65Height {
+	if pindex.Height+1 >= param.BIP65Height {
 		flags |= script.ScriptVerifyCheckLockTimeVerify
 	}
-	
+
+	// Start enforcing CSV (BIP68, BIP112 and BIP113) rule.
+	//if pindex.Height+1 >= param.CSVHeight {
+	//	flags |= script.ScriptVerifyCheckSequenceVerify
+	//}
 	// Start enforcing BIP112 (CHECKSEQUENCEVERIFY) using versionbits logic.
-	if versionbits.VersionBitsState(pindex.Prev, param, consensus.DeploymentCSV, versionbits.VBCache) == versionbits.ThresholdActive {
+	if versionbits.VersionBitsState(pindex, param, consensus.DeploymentCSV, versionbits.VBCache) == versionbits.ThresholdActive {
 		flags |= script.ScriptVerifyCheckSequenceVerify
 	}
+
 	// If the UAHF is enabled, we start accepting replay protected txns
-	if chainparams.IsUAHFEnabled(pindex.Height) {
+	if model.IsUAHFEnabled(pindex.Height) {
 		flags |= script.ScriptVerifyStrictEnc
-		flags |= script.ScriptEnableSigHashForkId
+		flags |= script.ScriptEnableSigHashForkID
 	}
-	
+
 	// If the Cash HF is enabled, we start rejecting transaction that use a high
 	// s in their signature. We also make sure that signature that are supposed
 	// to fail (for instance in multisig or other forms of smart contracts) are
 	// null.
-	if pindex.IsCashHFEnabled(param) {
+	//if pindex.IsCashHFEnabled(param) {
+	//	flags |= script.ScriptVerifyLowS
+	//	flags |= script.ScriptVerifyNullFail
+	//}
+	if model.IsDAAEnabled(pindex.Height) {
 		flags |= script.ScriptVerifyLowS
 		flags |= script.ScriptVerifyNullFail
 	}
-	
+	//The monolith HF enable a set of opcodes.
+	if model.IsMonolithEnabled(pindex.GetMedianTimePast()) {
+		flags |= script.ScriptEnableMonolithOpcodes
+	}
+	//if chainparams.IsMagneticAnomalyEnable(pindex.GetMedianTimePast()) {
+	//	flags |= script.ScriptEnableCheckDataSig
+	//	flags |= script.ScriptVerifySigPushOnly
+	//	flags |= script.ScriptVerifyCleanStack
+	//}
+	// We make sure this node will have replay protection during the next hard
+	// fork.
+	if model.IsReplayProtectionEnabled(pindex.GetMedianTimePast()) {
+		flags |= script.ScriptEnableReplayProtection
+	}
+
 	return flags
 }
 
-// GetSpecIndex Returns the blIndex entry at a particular height in this chain, or nullptr
+// GetIndex Returns the blIndex entry at a particular height in this chain, or nullptr
 // if no such height exists.
 func (c *Chain) GetIndex(height int32) *blockindex.BlockIndex {
 	if height < 0 || height >= int32(len(c.active)) {
@@ -184,19 +280,29 @@ func (c *Chain) GetIndex(height int32) *blockindex.BlockIndex {
 }
 
 // Equal Compare two chains efficiently.
+
 func (c *Chain) Equal(dst *Chain) bool {
+	if dst == nil {
+		return false
+	}
 	return len(c.active) == len(dst.active) &&
 		c.active[len(c.active)-1] == dst.active[len(dst.active)-1]
 }
 
 // Contains /** Efficiently check whether a block is present in this chain
 func (c *Chain) Contains(index *blockindex.BlockIndex) bool {
+	if index == nil {
+		return false
+	}
 	return c.GetIndex(index.Height) == index
 }
 
 // Next Find the successor of a block in this chain, or nullptr if the given
 // index is not found or is the tip.
 func (c *Chain) Next(index *blockindex.BlockIndex) *blockindex.BlockIndex {
+	if index == nil {
+		return nil
+	}
 	if c.Contains(index) {
 		return c.GetIndex(index.Height + 1)
 	}
@@ -206,7 +312,8 @@ func (c *Chain) Next(index *blockindex.BlockIndex) *blockindex.BlockIndex {
 // Height Return the maximal height in the chain. Is equal to chain.Tip() ?
 // chain.Tip()->nHeight : -1.
 func (c *Chain) Height() int32 {
-	return int32(len(c.active) - 1)
+	chainLen := int32(len(c.active))
+	return chainLen - 1
 }
 
 // SetTip Set/initialize a chain with a given tip.
@@ -223,7 +330,10 @@ func (c *Chain) SetTip(index *blockindex.BlockIndex) {
 		c.active[index.Height] = index
 		index = index.Prev
 	}
+
+	c.UpdateSyncingState()
 }
+
 // SetTip Set/initialize a chain with a given tip.
 // func (c *Chain) SetTip1(index *blockindex.BlockIndex) {
 // 	if index == nil {
@@ -247,9 +357,12 @@ func (c *Chain) SetTip(index *blockindex.BlockIndex) {
 // 	// todo update active
 // }
 
-// get ancestor from active chain
+// GetAncestor gets ancestor from active chain.
 func (c *Chain) GetAncestor(height int32) *blockindex.BlockIndex {
-	if len(c.active) >= int(height){
+	if height < 0 {
+		return nil
+	}
+	if len(c.active) > int(height) {
 		return c.active[height]
 	}
 	return nil
@@ -257,13 +370,13 @@ func (c *Chain) GetAncestor(height int32) *blockindex.BlockIndex {
 
 // GetLocator get a series blockHash, which slice contain blocks sort
 // by height from Highest to lowest.
-func (ch *Chain) GetLocator(index *blockindex.BlockIndex) *BlockLocator {
+func (c *Chain) GetLocator(index *blockindex.BlockIndex) *BlockLocator {
 	step := 1
 	blockHashList := make([]util.Hash, 0, 32)
 	if index == nil {
-		index = ch.Tip()
-		log.Trace("GetLocator Tip hash : %s,  height : %d .",
-			index.GetBlockHash().String(), index.Height)
+		index = c.Tip()
+		log.Trace("GetLocator Tip hash: %s,  height: %d",
+			index.GetBlockHash(), index.Height)
 	}
 	for {
 		blockHashList = append(blockHashList, *index.GetBlockHash())
@@ -274,13 +387,13 @@ func (ch *Chain) GetLocator(index *blockindex.BlockIndex) *BlockLocator {
 		if height < 0 {
 			height = 0
 		}
-		if ch.Contains(index) {
-			index = ch.GetIndex(height)
+		if c.Contains(index) {
+			index = c.GetIndex(height)
 		} else {
 			index = index.GetAncestor(height)
 		}
 		log.Trace("GetLocator contain hash : %s, height : %d .",
-			index.GetBlockHash().String(), index.Height)
+			index.GetBlockHash(), index.Height)
 		if len(blockHashList) > 10 {
 			step *= 2
 		}
@@ -289,35 +402,27 @@ func (ch *Chain) GetLocator(index *blockindex.BlockIndex) *BlockLocator {
 }
 
 // FindFork Find the last common block between this chain and a block blIndex entry.
-func (chain *Chain) FindFork(blIndex *blockindex.BlockIndex) *blockindex.BlockIndex {
+func (c *Chain) FindFork(blIndex *blockindex.BlockIndex) *blockindex.BlockIndex {
 	if blIndex == nil {
 		return nil
 	}
 
-	if blIndex.Height > chain.Height() {
-		blIndex = blIndex.GetAncestor(chain.Height())
+	if blIndex.Height > c.Height() {
+		blIndex = blIndex.GetAncestor(c.Height())
 	}
 
-	for blIndex != nil && !chain.Contains(blIndex) {
+	for blIndex != nil && !c.Contains(blIndex) {
 		blIndex = blIndex.Prev
 	}
 	return blIndex
 }
 
-// FindEarliestAtLeast Find the earliest block with timestamp equal or greater than the given.
-func (chain *Chain) FindEarliestAtLeast(time int64) *blockindex.BlockIndex {
-
-	return nil
-}
-
-
-func (chain *Chain) RemoveFromBranch(bis []*blockindex.BlockIndex) {
-
-}
-
-//find blockindex'parent in branch
+// ParentInBranch finds blockindex'parent in branch
 func (c *Chain) ParentInBranch(pindex *blockindex.BlockIndex) bool {
-	for _, bi := range c.branch{
+	if pindex == nil {
+		return false
+	}
+	for _, bi := range c.branch {
 		bh := pindex.Header
 		if bi.GetBlockHash().IsEqual(&bh.HashPrevBlock) {
 			return true
@@ -325,9 +430,13 @@ func (c *Chain) ParentInBranch(pindex *blockindex.BlockIndex) bool {
 	}
 	return false
 }
-//find blockindex in branch
+
+// InBranch finds blockindex in branch
 func (c *Chain) InBranch(pindex *blockindex.BlockIndex) bool {
-	for _, bi := range c.branch{
+	if pindex == nil {
+		return false
+	}
+	for _, bi := range c.branch {
 		bh := pindex.GetBlockHash()
 		if bi.GetBlockHash().IsEqual(bh) {
 			return true
@@ -335,6 +444,8 @@ func (c *Chain) InBranch(pindex *blockindex.BlockIndex) bool {
 	}
 	return false
 }
+
+// blocks in the branch ranks in the order of 'proof of work'
 func (c *Chain) insertToBranch(bis *blockindex.BlockIndex) {
 	c.branch = append(c.branch, bis)
 	sort.SliceStable(c.branch, func(i, j int) bool {
@@ -342,8 +453,15 @@ func (c *Chain) insertToBranch(bis *blockindex.BlockIndex) {
 		return c.branch[i].ChainWork.Cmp(&jWork) == -1
 	})
 }
-func (c *Chain) AddToBranch(bis *blockindex.BlockIndex) {
-	
+
+func (c *Chain) AddToBranch(bis *blockindex.BlockIndex) error {
+	if bis == nil {
+		return errors.New("nil blockIndex")
+	}
+	if bis.Prev == nil && !bis.IsGenesis(c.params) {
+		return errors.New("no blockIndexPrev")
+	}
+
 	q := queue.New()
 	q.Add(bis)
 	// Recursively process any descendant blocks that now may be eligible to
@@ -352,32 +470,42 @@ func (c *Chain) AddToBranch(bis *blockindex.BlockIndex) {
 		qindex := q.Remove()
 		pindex := qindex.(*blockindex.BlockIndex)
 		if !pindex.IsGenesis(c.params) {
-			pindex.ChainTxCount += pindex.Prev.ChainTxCount
+			pindex.ChainTxCount = pindex.Prev.ChainTxCount + pindex.TxCount
 		} else {
 			pindex.ChainTxCount = pindex.TxCount
 		}
 		pindex.SequenceID = c.GetReceivedID()
-		c.AddReceivedID()
-		// todo if pindex's work is less then tip's work
-		// if c.Tip() == nil || (c.Tip() !=nil && pindex.ChainWork.Cmp(&c.Tip().ChainWork)<=1) {
-		//
-		// }
-		if !c.InBranch(pindex){
+		if !c.InBranch(pindex) {
 			c.insertToBranch(pindex)
 		}
 		preHash := pindex.GetBlockHash()
 		childList, ok := c.orphan[*preHash]
-		if ok{
-			for child := range childList{
+		if ok {
+			for _, child := range childList {
 				q.Add(child)
 			}
 			delete(c.orphan, *preHash)
 		}
 	}
+	return nil
+}
+
+func (c *Chain) RemoveFromBranch(bis *blockindex.BlockIndex) error {
+	if bis == nil {
+		return errors.New("nil blockIndex")
+	}
+	bh := bis.GetBlockHash()
+	for i, bi := range c.branch {
+		if bi.GetBlockHash().IsEqual(bh) {
+			c.branch = append(c.branch[0:i], c.branch[i+1:]...)
+			return nil
+		}
+	}
+	return nil
 }
 
 func (c *Chain) FindMostWorkChain() *blockindex.BlockIndex {
-	if len(c.branch)>0{
+	if len(c.branch) > 0 {
 		return c.branch[len(c.branch)-1]
 	}
 	return nil
@@ -387,38 +515,72 @@ func (c *Chain) AddToIndexMap(bi *blockindex.BlockIndex) error {
 	// We assign the sequence id to blocks only when the full data is available,
 	// to avoid miners withholding blocks but broadcasting headers, to get a
 	// competitive advantage.
-	bi.SequenceID = 0
-	hash := bi.GetBlockHash()
-	c.indexMap[*hash] = bi
-	bh := bi.Header
-	pre, ok := c.indexMap[bh.HashPrevBlock]
-	if ok{
-		bi.Prev = pre
-		bi.Height = pre.Height+1
-		bi.BuildSkip()
+	if bi == nil {
+		return errors.New("nil blockIndex")
 	}
+	bi.SequenceID = 0
 	bi.TimeMax = bi.Header.Time
 	blockProof := pow.GetBlockProof(bi)
 	bi.ChainWork = *blockProof
-	if pre != nil {
-		 if pre.TimeMax > bi.TimeMax{
-		 	bi.TimeMax = pre.TimeMax
-		 }
-		bi.ChainWork = *bi.ChainWork.Add(&bi.ChainWork,&pre.ChainWork)
+	hash := bi.GetBlockHash()
+
+	c.indexMap[*hash] = bi
+
+	pre, ok := c.indexMap[bi.Header.HashPrevBlock]
+	if ok {
+		bi.Prev = pre
+		bi.Height = pre.Height + 1
 	}
-	bi.AddStatus(blockindex.BlockValidTree)
-	gPersist := global.GetInstance()
-	gPersist.AddDirtyBlockIndex(*bi.GetBlockHash(), bi)
+	if pre != nil {
+		if pre.TimeMax > bi.TimeMax {
+			bi.TimeMax = pre.TimeMax
+		}
+		bi.ChainWork = *bi.ChainWork.Add(&bi.ChainWork, &pre.ChainWork)
+	}
+	log.Debug("AddToIndexMap:%s index height:%d", hash, bi.Height)
+	bi.RaiseValidity(blockindex.BlockValidTree)
+	gPersist := persist.GetInstance()
+	gPersist.AddDirtyBlockIndex(bi)
 	return nil
 }
 
 func (c *Chain) AddToOrphan(bi *blockindex.BlockIndex) error {
 	bh := bi.Header
 	childList, ok := c.orphan[bh.HashPrevBlock]
-	if !ok{
-		childList = make([]*blockindex.BlockIndex,0,1)
+	if !ok {
+		childList = make([]*blockindex.BlockIndex, 0, 1)
 	}
 	childList = append(childList, bi)
 	c.orphan[bh.HashPrevBlock] = childList
 	return nil
+}
+
+func (c *Chain) ChainOrphanLen() int32 {
+	var orphanLen int32
+	for _, childList := range c.orphan {
+		orphanLen += int32(len(childList))
+	}
+
+	return orphanLen
+}
+
+func (c *Chain) ClearActive() {
+	c.active = make([]*blockindex.BlockIndex, 100)
+}
+
+func (c *Chain) IndexMapSize() int {
+	return len(c.indexMap)
+}
+
+//BuildForwardTree Build forward-pointing map of the entire block tree.
+func (c *Chain) BuildForwardTree() (forward map[*blockindex.BlockIndex][]*blockindex.BlockIndex) {
+	forward = make(map[*blockindex.BlockIndex][]*blockindex.BlockIndex)
+	for _, v := range c.indexMap {
+		if len(forward[v.Prev]) == 0 {
+			forward[v.Prev] = []*blockindex.BlockIndex{v}
+		} else {
+			forward[v.Prev] = append(forward[v.Prev], v)
+		}
+	}
+	return
 }

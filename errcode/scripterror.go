@@ -17,7 +17,14 @@ const (
 	ScriptErrSigCount
 	ScriptErrPubKeyCount
 
-	/* Failed verify operations */
+	/*  Operands checks */
+
+	ScriptErrInvalidOperandSize
+	ScriptErrInvalidNumberRange
+	ScriptErrImpossibleEncoding
+	ScriptErrInvalidSplitRange
+
+	/*  Failed verify operations */
 
 	ScriptErrVerify
 	ScriptErrEqualVerify
@@ -32,6 +39,11 @@ const (
 	ScriptErrInvalidStackOperation
 	ScriptErrInvalidAltStackOperation
 	ScriptErrUnbalancedConditional
+
+	/* Divisor errors */
+
+	ScriptErrDivByZero
+	ScriptErrModByZero
 
 	/* CheckLockTimeVerify and CheckSequenceVerify */
 
@@ -56,24 +68,28 @@ const (
 	ScriptErrDiscourageUpgradableNops
 	ScriptErrDiscourageUpgradableWitnessProgram
 
-	/* misc */
+	// ScriptErrNonCompressedPubKey description script errors
+
 	ScriptErrNonCompressedPubKey
 
-	/* anti replay */
-	ScriptErrIllegalForkId
-	ScriptErrMustUseForkId
+	// ScriptErrIllegalForkID anti replay
+
+	ScriptErrIllegalForkID
+	ScriptErrMustUseForkID
 
 	ScriptErrErrorCount
 
-	// other errcode
+	// ScriptErrSize other errcode
 	ScriptErrSize
 	ScriptErrNonStandard
 	ScriptErrNullData
 	ScriptErrBareMultiSig
 	ScriptErrMultiOpReturn
 	ScriptErrInvalidSignatureEncoding
-	ScriptErrNumberOverflow
-	ScriptErrNonMinimalEncodedNumber
+
+	//ScriptErrNumberOverflow
+	//ScriptErrNonMinimalEncodedNumber
+
 	ScriptErrInvalidOpCode
 	ScriptErrInValidPubKeyOrSig
 	ScriptErrScriptSigNotPushOnly
@@ -172,10 +188,14 @@ func scriptErrorString(scriptError ScriptErr) string {
 		return "Dummy CheckMultiSig argument must be zero"
 	case ScriptErrPubKeyType:
 		return "Public key is neither compressed or uncompressed"
+	case ScriptErrCleanStack:
+		return "Script did not clean its stack"
 	case ScriptErrMinimalIf:
 		return "OP_IF/NOTIF argument must be minimal"
 	case ScriptErrSigNullFail:
 		return "Signature must be zero for failed CHECK(MULTI)SIG operation"
+	case ScriptErrIllegalForkID:
+		return "Illegal use of SIGHASH_FORKID"
 	case ScriptErrDiscourageUpgradableNops:
 		return "NOPx reserved for soft-fork upgrades"
 	case ScriptErrDiscourageUpgradableWitnessProgram:

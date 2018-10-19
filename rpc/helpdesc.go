@@ -7,8 +7,8 @@ const (
 		"\nResult\n" +
 		"  excessiveBlockSize (integer) block size in bytes\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getexcessiveblock\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getexcessiveblock", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getexcessiveblock\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getexcessiveblock", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	setexcessiveblockDesc = "setexcessiveblock blockSize\n" +
 		"\nSet the excessive block size. Excessive blocks will not be used " +
@@ -17,8 +17,8 @@ const (
 		"\nResult\n" +
 		"  blockSize (integer) excessive block size in bytes\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli setexcessiveblock\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "setexcessiveblock", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl setexcessiveblock\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "setexcessiveblock", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 )
 
 //blockchain
@@ -78,8 +78,8 @@ const (
 		"  }\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getblockchaininfo" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getblockchaininfo", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getblockchaininfo\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getblockchaininfo", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getbestblockhashDesc = "getbestblockhash\n" +
 		"\nReturns the hash of the best (tip) block in the " +
@@ -87,16 +87,16 @@ const (
 		"\nResult:\n" +
 		"\"hex\"      (string) the block hash hex encoded\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getbestblockhash" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getbestblockhash", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getbestblockhash\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getbestblockhash", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getblockcountDesc = "getblockcount\n" +
 		"\nReturns the number of blocks in the longest blockchain.\n" +
 		"\nResult:\n" +
 		"n    (numeric) The current block count\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getblockcount" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getblockcount", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getblockcount\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getblockcount", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getblockDesc = "getblock \"blockhash\" ( verbose )\n" +
 		"\nIf verbose is false, returns a string that is serialized, " +
@@ -141,8 +141,8 @@ const (
 		"\"data\"             (string) A string that is serialized, " +
 		"hex-encoded data for block 'hash'.\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli getblock "00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09"` +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getblock", "params": ["00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl getblock "00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09"` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getblock", "params": ["00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getblockhashDesc = "getblockhash height\n" +
 		"\nReturns hash of block in best-block-chain at height provided.\n" +
@@ -151,8 +151,8 @@ const (
 		"\nResult:\n" +
 		"\"hash\"         (string) The block hash\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getblockhash 1000" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getblockhash", "params": [1000] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getblockhash 1000\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getblockhash", "params": [1000] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getblockheader = "getblockheader \"hash\" ( verbose )\n" +
 		"\nIf verbose is false, returns a string that is serialized, " +
@@ -192,8 +192,8 @@ const (
 		"\"data\"             (string) A string that is serialized, " +
 		"hex-encoded data for block 'hash'.\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli getblockheader "00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09"` +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getblockheader", "params": ["00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl getblockheader "00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09"` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getblockheader", "params": ["00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getchaintipsDesc = "getchaintips\n" +
 		"Return information about all known tips in the block tree," +
@@ -229,6 +229,36 @@ const (
 		"chain, which is certainly valid\n" +
 		"\nExamples:\n" // todo
 
+	getchaintxstatsDesc = "getchaintxstats ( nblocks blockhash )\n" +
+		"\nCompute statistics about the total number and rate of " +
+		"transactions in the chain.\n" +
+		"\nArguments:\n" +
+		"1. nblocks      (numeric, optional) Size of the window in number " +
+		"of blocks (default: one month).\n" +
+		"2. \"blockhash\"  (string, optional) The hash of the block that " +
+		"ends the window.\n" +
+		"\nResult:\n" +
+		"{\n" +
+		"  \"time\": xxxxx,                (numeric) The timestamp for the " +
+		"final block in the window in UNIX format.\n" +
+		"  \"txcount\": xxxxx,             (numeric) The total number of " +
+		"transactions in the chain up to that point.\n" +
+		"  \"window_block_count\": xxxxx,  (numeric) Size of the window in " +
+		"number of blocks.\n" +
+		"  \"window_tx_count\": xxxxx,     (numeric) The number of " +
+		"transactions in the window. Only returned if " +
+		"\"window_block_count\" is > 0.\n" +
+		"  \"window_interval\": xxxxx,     (numeric) The elapsed time in " +
+		"the window in seconds. Only returned if \"window_block_count\" is " +
+		"> 0.\n" +
+		"  \"txrate\": x.xx,               (numeric) The average rate of " +
+		"transactions per second in the window. Only returned if " +
+		"\"window_interval\" is > 0.\n" +
+		"}\n" +
+		"\nExamples:\n" +
+		"> coperctl getchaintxstats\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getchaintxstats", "params": [2016] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
+
 	getdifficultyDesc = "getdifficulty\n" +
 		"\nReturns the proof-of-work difficulty as a " +
 		"multiple of the minimum difficulty.\n" +
@@ -237,8 +267,8 @@ const (
 		"difficulty as a multiple of the minimum " +
 		"difficulty.\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getdifficulty" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getdifficulty", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getdifficulty\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getdifficulty", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getmempoolancestorsDesc = "getmempoolancestors txid (verbose)\n" +
 		"\nIf txid is in the mempool, returns all in-mempool ancestors.\n" +
@@ -288,8 +318,8 @@ const (
 		"  }, ...\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli getmempoolancestors "mytxid"` +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getmempoolancestors", "params": ["mytxid"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl getmempoolancestors "mytxid"` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getmempoolancestors", "params": ["mytxid"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getmempooldescendantsDesc = "getmempooldescendants txid (verbose)\n" +
 		"\nIf txid is in the mempool, returns all in-mempool descendants.\n" +
@@ -339,8 +369,8 @@ const (
 		"  }, ...\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli getmempooldescendants "mytxid"` +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getmempooldescendants", "params": ["mytxid"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl getmempooldescendants "mytxid"` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getmempooldescendants", "params": ["mytxid"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getmempoolentryDesc = "getmempoolentry txid\n" +
 		"\nReturns mempool data for given transaction\n" +
@@ -380,8 +410,8 @@ const (
 		"       ... ]\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli getmempoolentry "mytxid"` +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getmempoolentry", "params": ["mytxid"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl getmempoolentry "mytxid"` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getmempoolentry", "params": ["mytxid"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getmempoolinfoDesc = "getmempoolinfo\n" +
 		"\nReturns details on the active state of the TX memory pool.\n" +
@@ -397,8 +427,8 @@ const (
 		"be accepted\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getmempoolinfo" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getmempoolinfo", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getmempoolinfo\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getmempoolinfo", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getrawmempoolDesc = "getrawmempool ( verbose )\n" +
 		"\nReturns all transaction ids in memory pool as a json array of " +
@@ -446,8 +476,8 @@ const (
 		"  }, ...\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getrawmempool true" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getrawmempool", "params": [true] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getrawmempool true\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getrawmempool", "params": [true] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	gettxoutDesc = "gettxout \"txid\" n ( include_mempool )\n" +
 		"\nReturns details about an unspent transaction output.\n" +
@@ -455,7 +485,8 @@ const (
 		"1. \"txid\"       (string, required) The transaction id\n" +
 		"2. n              (numeric, required) vout number\n" +
 		"3. include_mempool  (boolean, optional) Whether to include the " +
-		"mempool\n" +
+		"mempool. Default: true. " +
+		"Note that an unspent output that is spent in the mempool won't appear.\n" +
 		"\nResult:\n" +
 		"{\n" +
 		"  \"bestblock\" : \"hash\",    (string) the block hash\n" +
@@ -478,14 +509,13 @@ const (
 		"  },\n" +
 		"  \"coinbase\" : true|false   (boolean) Coinbase or not\n" +
 		"}\n" +
-
 		"\nExamples:\n" +
 		"\nGet unspent transactions\n" +
-		"> bitcoin-cli listunspent\n" +
+		"> coperctl listunspent\n" +
 		"\nView the details\n" +
-		`> bitcoin-cli gettxout "txid" 1` +
+		`> coperctl gettxout "txid" 1` +
 		"\nAs a json rpc call\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "gettxout", "params": ["txid", 1] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "gettxout", "params": ["txid", 1] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	gettxoutsetinfoDesc = "gettxoutsetinfo\n" +
 		"\nReturns statistics about the unspent transaction output set.\n" +
@@ -505,8 +535,8 @@ const (
 		"  \"total_amount\": x.xxx          (numeric) The total amount\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli gettxoutsetinfo\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "gettxoutsetinfo", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl gettxoutsetinfo\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "gettxoutsetinfo", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	pruneblockchainDesc = "pruneblockchain\n" +
 		"\nArguments:\n" +
@@ -517,10 +547,11 @@ const (
 		"\nResult:\n" +
 		"n    (numeric) Height of the last block pruned.\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli pruneblockchain 1000\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "pruneblockchain", "params": [1000] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl pruneblockchain 1000\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "pruneblockchain", "params": [1000] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
-	verifychainDesc = "\nVerifies blockchain database.\n" +
+	verifychainDesc = "verifychain ( checklevel nblocks )\n" +
+		"\nVerifies blockchain database.\n" +
 		"\nArguments:\n" +
 		"1. checklevel   (numeric, optional, 0-4, default=3)" +
 		" How thorough the block verification is.\n" +
@@ -529,8 +560,8 @@ const (
 		"\nResult:\n" +
 		"true|false       (boolean) Verified or not\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli verifychain\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "verifychain", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl verifychain\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "verifychain", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	preciousblockDesc = "preciousblock \"blockhash\"\n" +
 		"\nTreats a block as if it were received before others with the " +
@@ -543,8 +574,26 @@ const (
 		"mark as precious\n" +
 		"\nResult:\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli preciousblock "blockhash"` + "\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "preciousblock", "params": ["blockhash"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl preciousblock "blockhash"` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "preciousblock", "params": ["blockhash"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
+
+	waitforblockheightDesc = "waitforblockheight \"height\" (timeout)\n" +
+		"\nWaits for (at least) block height and returns the height and " +
+		"hash\n" +
+		"of the current tip.\n" +
+		"\nReturns the current block on timeout or exit.\n" +
+		"\nArguments:\n" +
+		"1. height  (required, int) Block height to wait for (int)\n" +
+		"2. timeout (int, optional, default=0) Time in milliseconds to " +
+		"wait for a response. 0 indicates no timeout.\n" +
+		"\nResult:\n" +
+		"{                           (json object)\n" +
+		"  \"hash\" : {       (string) The blockhash\n" +
+		"  \"height\" : {     (int) Block height\n" +
+		"}\n" +
+		"\nExamples:\n" +
+		`> coperctl waitforblockheight "height"` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "waitforblockheight", "params": ["height"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 )
 
 //mining
@@ -564,8 +613,8 @@ const (
 		"\nResult:\n" +
 		"x             (numeric) Hashes per second estimated\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getnetworkhashps\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getnetworkhashps", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getnetworkhashps\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getnetworkhashps", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getmininginfoDesc = "getmininginfo\n" +
 		"\nReturns a json object containing mining-related information." +
@@ -584,8 +633,8 @@ const (
 		"defined in BIP70 (main, test, regtest)\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getmininginfo\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getmininginfo", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getmininginfo\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getmininginfo", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	prioritisetransactionDesc = ""
 
@@ -710,8 +759,8 @@ const (
 		"next block\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getblocktemplate\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getblocktemplate", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getblocktemplate\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getblocktemplate", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	submitblockDesc = "submitblock \"hexdata\" ( \"jsonparametersobject\" )\n" +
 		"\nAttempts to submit new block to network.\n" +
@@ -728,8 +777,8 @@ const (
 		"    }\n" +
 		"\nResult:\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli submitblock "mydata"` + "\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "submitblock", "params": ["mydata"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl submitblock "mydata"` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "submitblock", "params": ["mydata"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	generateDesc = "generate nblocks ( maxtries )\n" +
 		"\nMine up to nblocks blocks immediately (before the RPC call " +
@@ -743,7 +792,7 @@ const (
 		"[ blockhashes ]     (array) hashes of blocks generated\n" +
 		"\nExamples:\n" +
 		"\nGenerate 11 blocks\n" +
-		"> bitcoin-cli generate 11"
+		"> coperctl generate 11\n"
 
 	generatetoaddressDesc = "generatetoaddress nblocks address (maxtries)\n" +
 		"\nMine blocks immediately to a specified address (before the RPC " +
@@ -759,7 +808,7 @@ const (
 		"[ blockhashes ]     (array) hashes of blocks generated\n" +
 		"\nExamples:\n" +
 		"\nGenerate 11 blocks to myaddress\n" +
-		`> bitcoin-cli generatetoaddress 11 "myaddress"`
+		`> coperctl generatetoaddress 11 "myaddress"`
 )
 
 // net
@@ -769,8 +818,8 @@ const (
 		"\nResult:\n" +
 		"n          (numeric) The connection count\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getconnectioncount\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getconnectioncount", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getconnectioncount\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getconnectioncount", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	pingDesc = "ping\n" +
 		"\nRequests that a ping be sent to all other nodes, to measure " +
@@ -780,8 +829,8 @@ const (
 		"Ping command is handled in queue with all other commands, so it " +
 		"measures processing backlog, not just network ping.\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli ping\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "ping", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl ping\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "ping", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getpeerinfoDesc = "getpeerinfo\n" +
 		"\nReturns data about each connected network node as a json array " +
@@ -850,8 +899,8 @@ const (
 		"  ,...\n" +
 		"]\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getpeerinfo\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getpeerinfo", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getpeerinfo\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getpeerinfo", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	addnodeDesc = "addnode \"node\" \"add|remove|onetry\"\n" +
 		"\nAttempts add or remove a node from the addnode list.\n" +
@@ -863,8 +912,8 @@ const (
 		"list, 'remove' to remove a node from the list, 'onetry' to try a " +
 		"connection to the node once\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli addnode "192.168.0.6:8333" "onetry"` + "\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "addnode", "params": ["192.168.0.6:8333", "onetry"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl addnode "192.168.0.6:8333" "onetry"` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "addnode", "params": ["192.168.0.6:8333", "onetry"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	disconnectnodeDesc = "disconnectnode \"[address]\" [nodeid]\n" +
 		"\nImmediately disconnects from the specified peer node.\n" +
@@ -878,10 +927,10 @@ const (
 		"2. \"nodeid\"      (number, optional) The node ID (see " +
 		"getpeerinfo for node IDs)\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli disconnectnode "192.168.0.6:8333"` + "\n" +
-		`> bitcoin-cli disconnectnode "" 1` + "\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "disconnectnode", "params": ["192.168.0.6:8333"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/` + "\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "disconnectnode", "params": ["", 1] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl disconnectnode "192.168.0.6:8333"` + "\n" +
+		`> coperctl disconnectnode "" 1` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "disconnectnode", "params": ["192.168.0.6:8333"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "disconnectnode", "params": ["", 1] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getaddednodeinfoDesc = "getaddednodeinfo ( \"node\" )\n" +
 		"\nReturns information about the given added node, or all added " +
@@ -909,9 +958,9 @@ const (
 		"  ,...\n" +
 		"]\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getaddednodeinfo true" +
-		`> bitcoin-cli getaddednodeinfo true "192.168.0.201"` +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getaddednodeinfo", "params": [true, "192.168.0.201"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getaddednodeinfo true\n" +
+		`> coperctl getaddednodeinfo true "192.168.0.201"` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getaddednodeinfo", "params": [true, "192.168.0.201"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getnettotalsDesc = "getnettotals\n" +
 		"\nReturns information about network traffic, including bytes in, " +
@@ -940,8 +989,8 @@ const (
 		"  }\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getnettotals\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getnettotals", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getnettotals\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getnettotals", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	getnetworkinfoDesc = "getnetworkinfo\n" +
 		"Returns an object containing various state info regarding P2P " +
@@ -1002,8 +1051,8 @@ const (
 		"(string) any network warnings\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getnetworkinfo\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getnetworkinfo", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getnetworkinfo\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getnetworkinfo", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	setbanDesc = "setban \"subnet\" \"add|remove\" (bantime) (absolute)\n" +
 		"\nAttempts add or remove a IP/Subnet from the banned list.\n" +
@@ -1020,21 +1069,21 @@ const (
 		"4. \"absolute\"     (boolean, optional) If set, the bantime must " +
 		"be a absolute timestamp in seconds since epoch (Jan 1 1970 GMT)\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli setban "192.168.0.6" "add" 86400` + "\n" +
-		`> bitcoin-cli setban "192.168.0.0/24" "add"` + "\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "setban", "params": ["192.168.0.6", "add", 86400] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl setban "192.168.0.6" "add" 86400` + "\n" +
+		`> coperctl setban "192.168.0.0/24" "add"` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "setban", "params": ["192.168.0.6", "add", 86400] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	listbannedDesc = "listbanned\n" +
 		"\nList all banned IPs/Subnets.\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli listbanned` + "\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "listbanned", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl listbanned` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "listbanned", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	clearbannedDesc = "clearbanned\n" +
 		"\nClear all banned IPs.\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli listbanned` + "\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "clearbanned", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl listbanned` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "clearbanned", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	setnetworkactiveDesc = "setnetworkactive true|false\n" +
 		"\nDisable/enable all p2p network activity.\n" +
@@ -1113,9 +1162,9 @@ const (
 		"since epoch (Jan 1 1970 GMT)\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli getrawtransaction "mytxid"` + "\n" +
-		`> bitcoin-cli getrawtransaction "mytxid" true` + "\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getrawtransaction", "params": ["mytxid", true] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl getrawtransaction "mytxid"` + "\n" +
+		`> coperctl getrawtransaction "mytxid" true` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getrawtransaction", "params": ["mytxid", true] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	createrawtransactionDesc = "createrawtransaction [{\"txid\":\"id\",\"vout\":n},...] " +
 		"{\"address\":amount,\"data\":\"hex\",...} ( locktime )\n" +
@@ -1156,15 +1205,13 @@ const (
 		"\"transaction\"              (string) hex string of the " +
 		"transaction\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli createrawtransaction "[{\"txid\":\"myid\",\"vout\":0}]" "{\"address\":0.01}"` +
+		`> coperctl createrawtransaction "[{\"txid\":\"myid\",\"vout\":0}]" "{\"address\":0.01}"` +
 		"\n" +
-		`> bitcoin-cli createrawtransaction "[{\"txid\":\"myid\",\"vout\":0}]" "{\"address\":0.01}"` +
+		`> coperctl createrawtransaction "[{\"txid\":\"myid\",\"vout\":0}]" "{\"data\":\"00010203\"}"` +
 		"\n" +
-		`> bitcoin-cli createrawtransaction "[{\"txid\":\"myid\",\"vout\":0}]" "{\"data\":\"00010203\"}"` +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "createrawtransaction", "params": ["[{\"txid\":\"myid\",\"vout\":0}]", "{\"address\":0.01}"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/` +
 		"\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "createrawtransaction", "params": ["[{\"txid\":\"myid\",\"vout\":0}]", "{\"address\":0.01}"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/` +
-		"\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "createrawtransaction", "params": ["[{\"txid\":\"myid\",\"vout\":0}]", "{\"data\":\"00010203\"}"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "createrawtransaction", "params": ["[{\"txid\":\"myid\",\"vout\":0}]", "{\"data\":\"00010203\"}"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	decoderawtransactionDesc = "decoderawtransaction \"hexstring\"\n" +
 		"\nReturn a JSON object representing the serialized, hex-encoded " +
@@ -1213,9 +1260,9 @@ const (
 		"  ],\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli decoderawtransaction "hexstring"` +
+		`> coperctl decoderawtransaction "hexstring"` +
 		"\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "decoderawtransaction", "params": ["hexstring"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "decoderawtransaction", "params": ["hexstring"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	decodescriptDesc = "decodescript \"hexstring\"\n" +
 		"\nDecode a hex-encoded script.\n" +
@@ -1236,9 +1283,9 @@ const (
 		"P2SH).\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli decodescript "hexstring"` +
+		`> coperctl decodescript "hexstring"` +
 		"\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "decodescript", "params": ["hexstring"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "decodescript", "params": ["hexstring"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	sendrawtransactionDesc = "sendrawtransaction \"hexstring\" ( allowhighfees )\n" +
 		"\nSubmits raw transaction (serialized, hex-encoded) to local node " +
@@ -1253,14 +1300,14 @@ const (
 		"\"hex\"             (string) The transaction hash in hex\n" +
 		"\nExamples:\n" +
 		"\nCreate a transaction\n" +
-		`> bitcoin-cli createrawtransaction "[{\"txid\" : \"mytxid\",\"vout\":0}]" "{\"myaddress\":0.01}"` +
+		`> coperctl createrawtransaction "[{\"txid\" : \"mytxid\",\"vout\":0}]" "{\"myaddress\":0.01}"` +
 		"\n" +
 		"Sign the transaction, and get back the hex\n" +
-		`> bitcoin-cli signrawtransaction "myhex"` + "\n\n" +
+		`> coperctl signrawtransaction "myhex"` + "\n\n" +
 		"Send the transaction (signed hex)\n" +
-		`> bitcoin-cli sendrawtransaction "signedhex"` + "\n\n" +
+		`> coperctl sendrawtransaction "signedhex"` + "\n\n" +
 		"As a json rpc call\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "sendrawtransaction", "params": ["signedhex"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "sendrawtransaction", "params": ["signedhex"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	signrawtransactionDesc = "signrawtransaction \"hexstring\" ( " +
 		"[{\"txid\":\"id\",\"vout\":n,\"scriptPubKey\":\"hex\"," +
@@ -1340,10 +1387,9 @@ const (
 		"    ,...\n" +
 		"  ]\n" +
 		"}\n" +
-
 		"\nExamples:\n" +
-		`> bitcoin-cli signrawtransaction "myhex"` + "\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "signrawtransaction", "params": ["myhex"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl signrawtransaction "myhex"` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "signrawtransaction", "params": ["myhex"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	gettxoutproofDesc = "gettxoutproof [\"txid\",...] ( blockhash )\n" +
 		"\nReturns a hex-encoded proof that \"txid\" was included in a " +
@@ -1414,8 +1460,18 @@ const (
 		"  \"errors\": \"...\"           (string) any error messages\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		"> bitcoin-cli getinfo\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getinfo", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		"> coperctl getinfo\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "getinfo", "params": [] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
+
+	helpDesc = "help ( \"command\" )\n" +
+		"\nList all commands, or get help for a specified command.\n" +
+		"\nArguments:\n" +
+		"1. \"command\"     (string, optional) The command to get help on\n" +
+		"\nResult:\n" +
+		"\"text\"     (string) The help text\n"
+
+	stopDesc = "stop\n" +
+		"\nStop Copernicus server."
 
 	validateaddressDesc = "validateaddress \"address\"\n" +
 		"\nReturn information about the given bitcoin address.\n" +
@@ -1451,14 +1507,13 @@ const (
 		"Hash160 of the HD master pubkey\n" +
 		"}\n" +
 		"\nExamples:\n" +
-		`> bitcoin-cli validateaddress "1PSSGeFHDnKNxiEyFrD1wcEaHr9hrQDDWc` + "\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "validateaddress", "params": ["1PSSGeFHDnKNxiEyFrD1wcEaHr9hrQDDWc"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> coperctl validateaddress "1PSSGeFHDnKNxiEyFrD1wcEaHr9hrQDDWc"` + "\n" +
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "validateaddress", "params": ["1PSSGeFHDnKNxiEyFrD1wcEaHr9hrQDDWc"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
 
 	createmultisigDesc = "createmultisig nrequired [\"key\",...]\n" +
 		"\nCreates a multi-signature address with n signature of m keys " +
 		"required.\n" +
 		"It returns a json object with the address and redeemScript.\n" +
-
 		"\nArguments:\n" +
 		"1. nrequired      (numeric, required) The number of required " +
 		"signatures out of the n keys or addresses.\n" +
@@ -1469,7 +1524,6 @@ const (
 		"key\n" +
 		"       ,...\n" +
 		"     ]\n" +
-
 		"\nResult:\n" +
 		"{\n" +
 		"  \"address\":\"multisigaddress\",  (string) The value of the new " +
@@ -1477,10 +1531,12 @@ const (
 		"  \"redeemScript\":\"script\"       (string) The string value of " +
 		"the hex-encoded redemption script.\n" +
 		"}\n" +
-
 		"\nExamples:\n" +
 		"\nCreate a multisig address from 2 addresses\n" +
-		`> bitcoin-cli createmultisig 2 "[\"16sSauSf5pF2UkUwvKGq4qjNRzBZYqgEL5\",\"171sgjn4YtPu27adkKGrdDwzRTxnRkBfKV\"]"` +
+		`> coperctl createmultisig 2 "[\"16sSauSf5pF2UkUwvKGq4qjNRzBZYqgEL5\",\"171sgjn4YtPu27adkKGrdDwzRTxnRkBfKV\"]"` +
 		"\nAs a json rpc call\n" +
-		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "createmultisig", "params": [2, "[\"16sSauSf5pF2UkUwvKGq4qjNRzBZYqgEL5\",\"171sgjn4YtPu27adkKGrdDwzRTxnRkBfKV\"]"] }' -H 'content-type: text/plain;' http://127.0.0.1:8332/`
+		`> curl --user myusername --data-binary '{"jsonrpc": "1.0", "id":"curltest", "method": "createmultisig", "params": [2, "[\"16sSauSf5pF2UkUwvKGq4qjNRzBZYqgEL5\",\"171sgjn4YtPu27adkKGrdDwzRTxnRkBfKV\"]"] }' -H 'content-type: text/plain;' http://127.0.0.1:8334/`
+
+	echoDesc = "echo \"message\" ...\n" +
+		"\nSimply echo back the input arguments. This command is for testing."
 )

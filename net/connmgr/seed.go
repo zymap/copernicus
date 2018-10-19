@@ -9,10 +9,11 @@ import (
 	mrand "math/rand"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/copernet/copernicus/log"
-	"github.com/copernet/copernicus/model/chainparams"
+	"github.com/copernet/copernicus/model"
 	"github.com/copernet/copernicus/net/wire"
 )
 
@@ -31,8 +32,10 @@ type OnSeed func(addrs []*wire.NetAddress)
 type LookupFunc func(string) ([]net.IP, error)
 
 // SeedFromDNS uses DNS seeding to populate the address manager with peers.
-func SeedFromDNS(chainParams *chainparams.BitcoinParams, reqServices wire.ServiceFlag,
+func SeedFromDNS(chainParams *model.BitcoinParams, reqServices wire.ServiceFlag,
 	lookupFn LookupFunc, seedFn OnSeed) {
+
+	var wgDNS sync.WaitGroup
 
 	for _, dnsseed := range chainParams.DNSSeeds {
 		var host string
@@ -41,8 +44,9 @@ func SeedFromDNS(chainParams *chainparams.BitcoinParams, reqServices wire.Servic
 		} else {
 			host = fmt.Sprintf("x%x.%s", uint64(reqServices), dnsseed.Host)
 		}
-
+		wgDNS.Add(1)
 		go func(host string) {
+			defer wgDNS.Done()
 			randSource := mrand.New(mrand.NewSource(time.Now().UnixNano()))
 
 			seedpeers, err := lookupFn(host)
@@ -69,8 +73,8 @@ func SeedFromDNS(chainParams *chainparams.BitcoinParams, reqServices wire.Servic
 						randSource.Int31n(secondsIn4Days))),
 					0, peer, uint16(intPort))
 			}
-
 			seedFn(addresses)
 		}(host)
 	}
+	wgDNS.Wait()
 }

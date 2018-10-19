@@ -9,6 +9,7 @@ import (
 	"github.com/copernet/copernicus/model/outpoint"
 	"github.com/copernet/copernicus/model/script"
 	"github.com/copernet/copernicus/util"
+	"math"
 )
 
 type TxIn struct {
@@ -77,7 +78,7 @@ func (txIn *TxIn) SetScriptSig(scriptSig *script.Script) {
 	txIn.scriptSig = scriptSig
 }
 
-func (txIn *TxIn) CheckStandard() error {
+func (txIn *TxIn) CheckStandard() (bool, string) {
 	return txIn.scriptSig.CheckScriptSigStandard()
 }
 
@@ -92,5 +93,8 @@ func (txIn *TxIn) String() string {
 
 func NewTxIn(previousOutPoint *outpoint.OutPoint, scriptSig *script.Script, sequence uint32) *TxIn {
 	txIn := TxIn{PreviousOutPoint: previousOutPoint, scriptSig: scriptSig, Sequence: sequence}
+	if txIn.PreviousOutPoint == nil {
+		txIn.PreviousOutPoint = outpoint.NewOutPoint(util.Hash{}, math.MaxUint32)
+	}
 	return &txIn
 }

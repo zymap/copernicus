@@ -2,6 +2,9 @@ package mempool
 
 import (
 	"fmt"
+	"math"
+	"testing"
+
 	"github.com/copernet/copernicus/model/opcodes"
 	"github.com/copernet/copernicus/model/outpoint"
 	"github.com/copernet/copernicus/model/script"
@@ -11,15 +14,13 @@ import (
 	"github.com/copernet/copernicus/util"
 	"github.com/copernet/copernicus/util/amount"
 	"github.com/google/btree"
-	"math"
-	"testing"
 )
 
 type TestMemPoolEntry struct {
 	Fee            amount.Amount
 	Time           int64
 	Priority       float64
-	Height         int
+	Height         int32
 	SpendsCoinbase bool
 	SigOpCost      int
 	lp             *LockPoints
@@ -47,7 +48,7 @@ func (t *TestMemPoolEntry) SetTime(time int64) *TestMemPoolEntry {
 	return t
 }
 
-func (t *TestMemPoolEntry) SetHeight(height int) *TestMemPoolEntry {
+func (t *TestMemPoolEntry) SetHeight(height int32) *TestMemPoolEntry {
 	t.Height = height
 	return t
 }
@@ -67,7 +68,7 @@ func (t *TestMemPoolEntry) FromTxToEntry(tx *tx.Tx) *TxEntry {
 	if t.lp != nil {
 		lp = *(t.lp)
 	}
-	entry := NewTxentry(tx, int64(t.Fee), t.Time, int(t.Height), lp, int(t.SigOpCost), t.SpendsCoinbase)
+	entry := NewTxentry(tx, int64(t.Fee), t.Time, t.Height, lp, int(t.SigOpCost), t.SpendsCoinbase)
 	return entry
 }
 
@@ -75,7 +76,7 @@ func TestTxMempooladdTx(t *testing.T) {
 	testEntryHelp := NewTestMemPoolEntry()
 
 	txParentPtr := tx.NewTx(0, tx.TxVersion)
-	txin := txin2.NewTxIn(&outpoint.OutPoint{util.HashOne, 0}, script.NewScriptRaw([]byte{opcodes.OP_11}), script.SequenceFinal)
+	txin := txin2.NewTxIn(&outpoint.OutPoint{Hash: util.HashOne, Index: 0}, script.NewScriptRaw([]byte{opcodes.OP_11}), script.SequenceFinal)
 	txParentPtr.AddTxIn(txin)
 	for i := 0; i < 3; i++ {
 		o := txout.NewTxOut(33000, script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL}))
@@ -85,7 +86,7 @@ func TestTxMempooladdTx(t *testing.T) {
 
 	var txChild [3]tx.Tx
 	for i := 0; i < 3; i++ {
-		ins := txin2.NewTxIn(&outpoint.OutPoint{txParentPtr.GetHash(), uint32(i)}, script.NewScriptRaw([]byte{opcodes.OP_11}), script.SequenceFinal)
+		ins := txin2.NewTxIn(&outpoint.OutPoint{Hash: txParentPtr.GetHash(), Index: uint32(i)}, script.NewScriptRaw([]byte{opcodes.OP_11}), script.SequenceFinal)
 		txChild[i].AddTxIn(ins)
 		outs := txout.NewTxOut(11000, script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL}))
 		txChild[i].AddTxOut(outs)
@@ -94,7 +95,7 @@ func TestTxMempooladdTx(t *testing.T) {
 
 	var txGrandChild [3]tx.Tx
 	for i := 0; i < 3; i++ {
-		ins := txin2.NewTxIn(&outpoint.OutPoint{txChild[i].GetHash(), uint32(0)}, script.NewScriptRaw([]byte{opcodes.OP_11}), script.SequenceFinal)
+		ins := txin2.NewTxIn(&outpoint.OutPoint{Hash: txChild[i].GetHash(), Index: uint32(0)}, script.NewScriptRaw([]byte{opcodes.OP_11}), script.SequenceFinal)
 		txGrandChild[i].AddTxIn(ins)
 		outs := txout.NewTxOut(11000, script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL}))
 		txGrandChild[i].AddTxOut(outs)
@@ -195,32 +196,32 @@ func createTx() []*TxEntry {
 	tx1 := tx.NewTx(0, tx.TxVersion)
 	//ins := txin2.NewTxIn(&outpoint.OutPoint{txParentPtr.Hash, uint32(i)}, script.NewScriptRaw([]byte{opcodes.OP_11}), tx.MaxTxInSequenceNum)
 	//txChild[i].AddTxIn(ins)
-	outs := txout.NewTxOut(10*util.COIN, script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL}))
+	outs := txout.NewTxOut(amount.Amount(10*util.COIN), script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL}))
 	tx1.AddTxOut(outs)
 	_ = tx1.GetHash()
 	txentry1 := testEntryHelp.SetTime(10000).FromTxToEntry(tx1)
 
 	tx2 := tx.NewTx(0, tx.TxVersion)
-	out2 := txout.NewTxOut(2*util.COIN, script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL}))
+	out2 := txout.NewTxOut(amount.Amount(2*util.COIN), script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL}))
 	tx2.AddTxOut(out2)
 	_ = tx2.GetHash()
 	txentry2 := testEntryHelp.SetTime(20000).FromTxToEntry(tx2)
 
 	tx3 := tx.NewTx(0, tx.TxVersion)
-	ins := txin2.NewTxIn(&outpoint.OutPoint{tx1.GetHash(), 0}, script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL}), script.SequenceFinal)
+	ins := txin2.NewTxIn(&outpoint.OutPoint{Hash: tx1.GetHash(), Index: 0}, script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL}), script.SequenceFinal)
 	tx3.AddTxIn(ins)
-	out3 := txout.NewTxOut(5*util.COIN, script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL}))
+	out3 := txout.NewTxOut(amount.Amount(5*util.COIN), script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL}))
 	tx3.AddTxOut(out3)
 	_ = tx3.GetHash()
 	txentry3 := testEntryHelp.SetTime(15000).FromTxToEntry(tx3)
 
 	tx4 := tx.NewTx(0, tx.TxVersion)
-	out4 := txout.NewTxOut(6*util.COIN, script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL}))
+	out4 := txout.NewTxOut(amount.Amount(6*util.COIN), script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL}))
 	tx4.AddTxOut(out4)
 	_ = tx4.GetHash()
 	txentry4 := testEntryHelp.SetTime(25300).FromTxToEntry(tx4)
-	t := make([]*TxEntry, 4)
 
+	t := make([]*TxEntry, 4)
 	t[0] = txentry1
 	t[1] = txentry2
 	t[2] = txentry3
@@ -251,8 +252,8 @@ func TestMempoolSortTime(t *testing.T) {
 	testPool.timeSortData.Ascend(func(i btree.Item) bool {
 		entry := i.(*TxEntry)
 		if entry.Tx.GetHash() != sortedOrder[index] {
-			t.Errorf("the sort is error, index : %d, expect hash : %s, actual hash is : %s\n",
-				index, sortedOrder[index].ToString(), entry.Tx.GetHash().ToString())
+			t.Errorf("the sort is error, index : %d, expect hash : %s, actual hash is : %v\n",
+				index, sortedOrder[index], entry.Tx.GetHash())
 			return true
 		}
 		index++
@@ -284,11 +285,11 @@ func TestTxMempoolTrimToSize(t *testing.T) {
 	for _, e := range set {
 		ancestors, _ := testPool.CalculateMemPoolAncestors(e.Tx, noLimit, noLimit, noLimit, noLimit, true)
 		testPool.AddTx(e, ancestors)
-		fmt.Printf("entry size : %d, hash : %s, mempool size : %d \n", e.usageSize, e.Tx.GetHash().ToString(), testPool.cacheInnerUsage)
+		fmt.Printf("entry size : %d, hash : %v, mempool size : %d \n", e.usageSize, e.Tx.GetHash(), testPool.usageSize)
 	}
-	fmt.Println("mempool usage size : ", testPool.cacheInnerUsage)
+	fmt.Println("mempool usage size : ", testPool.usageSize)
 
-	testPool.trimToSize(testPool.cacheInnerUsage)
+	testPool.trimToSize(testPool.usageSize)
 	if testPool.Size() != len(set) {
 		t.Errorf("the pool element number is error, expect number is : %d, actual number is : %d", len(set), testPool.Size())
 	}
@@ -299,8 +300,8 @@ func TestTxMempoolTrimToSize(t *testing.T) {
 	if testPool.Size() != 0 {
 		t.Errorf("the pool element number is error, expect number is : %d, actual number is : %d", 0, testPool.Size())
 	}
-	if testPool.cacheInnerUsage != 0 {
-		t.Errorf("current the mempool size should be 0 byte, actual pool size is %d\n", testPool.cacheInnerUsage)
+	if testPool.usageSize != 0 {
+		t.Errorf("current the mempool size should be 0 byte, actual pool size is %d\n", testPool.usageSize)
 	}
 	fmt.Printf("============= end ============\n")
 }

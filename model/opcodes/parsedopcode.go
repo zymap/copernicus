@@ -13,45 +13,6 @@ type ParsedOpCode struct {
 	Data   []byte
 }
 
-// isDisabled returns whether or not the opCode is disabled and thus is always
-// bad to see in the instruction stream (even if turned off by a conditional).
-func (parsedOpCode *ParsedOpCode) isDisabled() bool {
-	switch parsedOpCode.OpValue {
-	case OP_CAT:
-		return true
-	case OP_SUBSTR:
-		return true
-	case OP_LEFT:
-		return true
-	case OP_RIGHT:
-		return true
-	case OP_INVERT:
-		return true
-	case OP_AND:
-		return true
-	case OP_OR:
-		return true
-	case OP_XOR:
-		return true
-	case OP_2MUL:
-		return true
-	case OP_2DIV:
-		return true
-	case OP_MUL:
-		return true
-	case OP_DIV:
-		return true
-	case OP_MOD:
-		return true
-	case OP_LSHIFT:
-		return true
-	case OP_RSHIFT:
-		return true
-	default:
-		return false
-	}
-}
-
 // alwaysIllegal returns whether or not the opcode is always illegal when passed
 // over by the program counter even if in a non-executed branch (it isn't a
 // coincidence that they are conditionals).
@@ -81,15 +42,27 @@ func (parsedOpCode *ParsedOpCode) isConditional() bool {
 	}
 }
 
+func (parsedOpCode *ParsedOpCode) CheckCompactDataPush() bool {
+	dataLen := len(parsedOpCode.Data)
+	opcode := parsedOpCode.OpValue
+	if dataLen <= 75 {
+		return int(opcode) == dataLen
+	}
+	if dataLen <= 255 {
+		return opcode == OP_PUSHDATA1
+	}
+	if dataLen <= 65535 {
+		return opcode == OP_PUSHDATA2
+	}
+	return opcode == OP_PUSHDATA4
+}
+
 func (parsedOpCode *ParsedOpCode) CheckMinimalDataPush() bool {
 	data := parsedOpCode.Data
 	dataLen := len(data)
 	opcode := parsedOpCode.OpValue
 	if dataLen == 0 {
-		if opcode != OP_0 {
-			return false
-		}
-		return true
+		return opcode == OP_0
 	}
 	if dataLen == 1 {
 		if data[0] >= 1 && data[0] <= 16 {
@@ -103,26 +76,8 @@ func (parsedOpCode *ParsedOpCode) CheckMinimalDataPush() bool {
 		}
 		return true
 	}
-	if dataLen <= 75 {
-		if int(opcode) != dataLen {
-			return false
-		}
-		return true
-	}
-	if dataLen <= 255 {
-		if opcode != OP_PUSHDATA1 {
-			return false
-		}
-		return true
-	}
-	if dataLen <= 65535 {
-		if opcode != OP_PUSHDATA2 {
-			return false
-		}
-		return true
-	}
 
-	return true
+	return parsedOpCode.CheckCompactDataPush()
 }
 
 func (parsedOpCode *ParsedOpCode) bytes() ([]byte, error) {
@@ -167,4 +122,10 @@ func (parsedOpCode *ParsedOpCode) bytes() ([]byte, error) {
 			parsedOpCode.OpValue, len(retBytes), nBytes)
 	}
 	return retBytes, nil
+}
+
+func NewParsedOpCode(opValue byte, length int, Data []byte) *ParsedOpCode {
+	newParsedOpCodeData := make([]byte, len(Data))
+	copy(newParsedOpCodeData, Data)
+	return &ParsedOpCode{OpValue: opValue, Length: length, Data: newParsedOpCodeData}
 }

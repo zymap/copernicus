@@ -1,43 +1,31 @@
 package block
 
 import (
-"bytes"
-"fmt"
-"io"
-"time"
-
-
-
-
-
-"github.com/copernet/copernicus/util"
-
-
+	"bytes"
+	"fmt"
+	"github.com/copernet/copernicus/util"
+	"io"
 )
-
 
 type BlockFileInfo struct {
 	Blocks      uint32 // number of blocks stored in file
 	Size        uint32 // number of used bytes of block file
 	UndoSize    uint32 // number of used bytes in the undo file
-	HeightFirst int32 // lowest height of block in file
-	HeightLast  int32 // highest height of block in file
+	HeightFirst int32  // lowest height of block in file
+	HeightLast  int32  // highest height of block in file
 	timeFirst   uint64 // earliest time of block in file
 	timeLast    uint64 // latest time of block in file
-	index uint32
-
+	//index       uint32
 }
 
-
-func (bfi *BlockFileInfo) GetSerializeList()[]string{
-	dumpList := []string{"Blocks","Size", "UndoSize", "HeightFirst", "HeightLast","timeFirst","timeLast","index"}
+func (bfi *BlockFileInfo) GetSerializeList() []string {
+	dumpList := []string{"Blocks", "Size", "UndoSize", "HeightFirst", "HeightLast", "timeFirst", "timeLast", "index"}
 	return dumpList
 }
 
-
 func (bfi *BlockFileInfo) Serialize(w io.Writer) error {
 	buf := bytes.NewBuffer(nil)
-	err := util.WriteElements(buf, bfi.Blocks, bfi.Size, bfi.UndoSize, bfi.HeightFirst, bfi.HeightLast, bfi.timeFirst, bfi.timeLast, bfi.index)
+	err := util.WriteElements(buf, bfi.Blocks, bfi.Size, bfi.UndoSize, bfi.HeightFirst, bfi.HeightLast, bfi.timeFirst, bfi.timeLast)
 	if err != nil {
 		return err
 	}
@@ -46,10 +34,7 @@ func (bfi *BlockFileInfo) Serialize(w io.Writer) error {
 }
 
 func (bfi *BlockFileInfo) Unserialize(r io.Reader) error {
-	err := util.ReadElements(r, &bfi.Blocks, &bfi.Size, &bfi.UndoSize, &bfi.HeightFirst, &bfi.HeightLast, &bfi.timeFirst, &bfi.timeLast, &bfi.index)
-	if err != nil {
-		return err
-	}
+	err := util.ReadElements(r, &bfi.Blocks, &bfi.Size, &bfi.UndoSize, &bfi.HeightFirst, &bfi.HeightLast, &bfi.timeFirst, &bfi.timeLast)
 	return err
 }
 
@@ -78,17 +63,11 @@ func (bfi *BlockFileInfo) AddBlock(nHeightIn int32, timeIn uint64) {
 	}
 }
 
-func (bfi *BlockFileInfo) GetIndex()uint32{
-	return bfi.index
-}
-func (bfi *BlockFileInfo) SetIndex(idx uint32){
-	bfi.index = idx
-}
 func (bfi *BlockFileInfo) String() string {
-	return fmt.Sprintf("BlockFileInfo(blocks=%d, size=%d, heights=%d...%d, time=%s...%s)",
+	return fmt.Sprintf("BlockFileInfo(blocks=%d, size=%d, heights=%d...%d, time=%d...%d)",
 		bfi.Blocks, bfi.Size, bfi.HeightFirst, bfi.HeightLast,
-		time.Unix(int64(bfi.timeFirst), 0).Format(time.RFC3339),
-		time.Unix(int64(bfi.timeLast), 0).Format(time.RFC3339))
+		bfi.timeFirst,
+		bfi.timeLast)
 }
 
 func NewBlockFileInfo() *BlockFileInfo {
