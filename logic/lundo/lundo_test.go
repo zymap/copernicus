@@ -1,14 +1,15 @@
 package lundo
 
 import (
+	"github.com/copernet/copernicus/model/opcodes"
+	"github.com/stretchr/testify/assert"
+	"io/ioutil"
+	"math"
+	"os"
 	"testing"
 
-	"bytes"
 	"github.com/copernet/copernicus/logic/ltx"
-	"github.com/copernet/copernicus/model"
 	"github.com/copernet/copernicus/model/block"
-	"github.com/copernet/copernicus/model/blockindex"
-	"github.com/copernet/copernicus/model/opcodes"
 	"github.com/copernet/copernicus/model/outpoint"
 	"github.com/copernet/copernicus/model/script"
 	"github.com/copernet/copernicus/model/tx"
@@ -18,35 +19,26 @@ import (
 	"github.com/copernet/copernicus/model/utxo"
 	"github.com/copernet/copernicus/persist/db"
 	"github.com/copernet/copernicus/util"
-	"github.com/davecgh/go-spew/spew"
 )
 
-func UpdateUTXOSet(blocks *block.Block, undos *undo.BlockUndo, coinMap *utxo.CoinsMap, param *model.BitcoinParams, height int) {
+func UpdateUTXOSet(block *block.Block, bkundo *undo.BlockUndo, coinMap *utxo.CoinsMap, height int) {
+	for i := 0; i < len(block.Txs); i++ {
+		txn := block.Txs[i]
+		if txn == block.Txs[0] {
+			ltx.TxAddCoins(txn, coinMap, int32(height))
+			continue
+		}
 
-	coinbaseTx := blocks.Txs[0]
-	txundos := undo.NewTxUndo()
-	ltx.UpdateTxCoins(coinbaseTx, coinMap, txundos, int32(height))
+		txundo := undo.NewTxUndo()
+		ltx.TxSpendCoins(txn, coinMap, txundo)
+		ltx.TxAddCoins(txn, coinMap, int32(height))
 
-	//len(blocks.Txs)=2
-	for i := 1; i < len(blocks.Txs); i++ {
-		txs := blocks.Txs[1]
-		txundo := undos.GetTxundo()
-		txundo = append(txundo, txundos)
-		undos.SetTxUndo(txundo)
-		ltx.UpdateTxCoins(txs, coinMap, undos.GetTxundo()[len(undos.GetTxundo())-1], int32(height))
+		bkundo.SetTxUndo(append(bkundo.GetTxundo(), txundo))
 	}
 
-	blockHash := blocks.GetHash()
-	//coinMap.Flush(blocks.GetHash())
+	blockHash := block.GetHash()
 	utxo.GetUtxoCacheInstance().UpdateCoins(coinMap, &blockHash)
-}
-
-func UndoBlock(blocks *block.Block, coinMap *utxo.CoinsMap, undos *undo.BlockUndo, params *model.BitcoinParams, height int) {
-
-	header := block.NewBlockHeader()
-	index := blockindex.NewBlockIndex(header)
-	index.Height = int32(height)
-	ApplyBlockUndo(undos, blocks, coinMap)
+	utxo.GetUtxoCacheInstance().Flush()
 }
 
 func AddCoins(txs *tx.Tx, coinMap *utxo.CoinsMap, height int32) {
@@ -54,104 +46,149 @@ func AddCoins(txs *tx.Tx, coinMap *utxo.CoinsMap, height int32) {
 	txid := txs.GetHash()
 	for idx, out := range txs.GetOuts() {
 		op := outpoint.NewOutPoint(txid, uint32(idx))
-		coin := utxo.NewCoin(out, height, isCoinbase)
+		coin := utxo.NewFreshCoin(out, height, isCoinbase)
 		coinMap.AddCoin(op, coin, false)
 	}
 }
 
-func HasSpendableCoin(coinMap *utxo.CoinsMap, txid util.Hash) bool {
-	return !coinMap.AccessCoin(outpoint.NewOutPoint(txid, 0)).IsSpent()
+func HasSpendableCoin(txid util.Hash) bool {
+	coin := utxo.GetUtxoCacheInstance().GetCoin(outpoint.NewOutPoint(txid, 0))
+	return coin != nil && !coin.IsSpent()
 }
 
 func TestMain(m *testing.M) {
-	config := utxo.UtxoConfig{Do: &db.DBOption{FilePath: "/tmp/undotest", CacheSize: 10000}}
+	path, _ := ioutil.TempDir("/tmp", "undotest")
+	defer os.RemoveAll(path)
+
+	config := utxo.UtxoConfig{Do: &db.DBOption{FilePath: path, CacheSize: 10000}}
 	utxo.InitUtxoLruTip(&config)
+
 	m.Run()
 }
 
-func TestConnectUtxoExtBlock(t *testing.T) {
-	chainparam := model.ActiveNetParams
-	blocks := block.NewBlock()
+func TestBlockUndo__single_tx_case(t *testing.T) {
+	block := block.NewBlock()
 
 	coinsMap := utxo.NewEmptyCoinsMap()
-	//hash1 := util.HashFromString("000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a6")
-	//outpoint1 := outpoint.OutPoint{Hash: *hash1, Index: 0}
-	//script2 := script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL})
-	//txout2 := txout.NewTxOut(3, script2)
-	//coin := utxo.NewCoin(txout2, 123456, false)
-	//coinsMap.AddCoin(&outpoint1, coin)
-	//c := coinsMap.GetCoin(&outpoint1)
-	//spew.Println(c)
+	block.Header.HashPrevBlock = updateTipHashInUtxo(coinsMap, t)
 
-	//genesis block hash, and set genesis block to utxo
-	randomhash := *util.GetRandHash()
-	blocks.Header.HashPrevBlock = randomhash
-	//coinsMap.Flush(randomhash)
-	utxo.GetUtxoCacheInstance().UpdateCoins(coinsMap, &randomhash)
+	coinbaseTx := makeCoinbaseTx()
+	txn1 := makeNormalTx()
+	block.Txs = []*tx.Tx{coinbaseTx, txn1}
+
+	// Now update the UTXO set
+	undos := undo.NewBlockUndo(2)
+	UpdateUTXOSet(block, undos, coinsMap, 100)
+
+	assert.True(t, HasSpendableCoin(coinbaseTx.GetHash()))
+	assert.True(t, HasSpendableCoin(txn1.GetHash()))
+
+	ret := ApplyBlockUndo(undos, block, coinsMap, 100)
+	blockHash := block.GetHash()
+	utxo.GetUtxoCacheInstance().UpdateCoins(coinsMap, &blockHash)
+	utxo.GetUtxoCacheInstance().Flush()
+
+	assert.Equal(t, undo.DisconnectOk, ret)
+	assert.Equal(t, 1, len(undos.GetTxundo()))
+	assert.False(t, HasSpendableCoin(coinbaseTx.GetHash()))
+	assert.False(t, HasSpendableCoin(txn1.GetHash()), "already undo the block, so no coins should exists.")
+}
+
+func TestBlockUndo__should_fail__when_txundo_count_not_equal_to__txns_count_in_block(t *testing.T) {
+	block := block.NewBlock()
+
+	coinsMap := utxo.NewEmptyCoinsMap()
+	block.Header.HashPrevBlock = updateTipHashInUtxo(coinsMap, t)
+
+	block.Txs = []*tx.Tx{makeCoinbaseTx(), makeNormalTx()}
+
+	ret := ApplyBlockUndo(undo.NewBlockUndo(0), block, coinsMap, 100)
+
+	assert.Equal(t, undo.DisconnectFailed, ret)
+}
+
+func TestBlockUndo__should_fail__when_coins_count_in_txundo___not_equal_to__txns_ins_count(t *testing.T) {
+	block := block.NewBlock()
+
+	coinsMap := utxo.NewEmptyCoinsMap()
+
+	block.Txs = []*tx.Tx{makeCoinbaseTx(), makeNormalTx()}
+
+	blockUndo := undo.NewBlockUndo(0)
+	txundo := undo.NewTxUndo()
+	txundo.SetUndoCoins(make([]*utxo.Coin, 100))
+	blockUndo.AddTxUndo(txundo)
+
+	ret := ApplyBlockUndo(blockUndo, block, coinsMap, 100)
+
+	assert.Equal(t, undo.DisconnectFailed, ret)
+}
+
+func TestBlockUndo__2_normal_tx_and_1_unspendable_opreturn_tx(t *testing.T) {
+	block := block.NewBlock()
+
+	coinsMap := utxo.NewEmptyCoinsMap()
+	block.Header.HashPrevBlock = updateTipHashInUtxo(coinsMap, t)
+
+	coinbaseTx := makeCoinbaseTx()
+	txn1 := makeNormalTx()
+	txn2 := makeUnspendableTx()
+	txn3 := makeNormalTx()
+	AddCoins(txn1, coinsMap, 100)
+	AddCoins(txn3, coinsMap, 100)
+	block.Txs = []*tx.Tx{coinbaseTx, txn1, txn2, txn3}
+
+	// Now update the UTXO set
+	undos := undo.NewBlockUndo(2)
+	UpdateUTXOSet(block, undos, coinsMap, 100)
+
+	assert.True(t, HasSpendableCoin(coinbaseTx.GetHash()))
+	assert.True(t, HasSpendableCoin(txn1.GetHash()))
+	assert.False(t, HasSpendableCoin(txn2.GetHash()))
+	assert.True(t, HasSpendableCoin(txn3.GetHash()))
+
+	ret := ApplyBlockUndo(undos, block, coinsMap, 100)
+	blockHash := block.GetHash()
+	utxo.GetUtxoCacheInstance().UpdateCoins(coinsMap, &blockHash)
+	utxo.GetUtxoCacheInstance().Flush()
+
+	assert.Equal(t, undo.DisconnectOk, ret)
+	assert.Equal(t, 3, len(undos.GetTxundo()))
+	assert.False(t, HasSpendableCoin(coinbaseTx.GetHash()))
+	assert.False(t, HasSpendableCoin(txn1.GetHash()), "already undo the block, so no coins should exists.")
+	assert.False(t, HasSpendableCoin(txn2.GetHash()), "already undo the block, so no coins should exists.")
+	assert.False(t, HasSpendableCoin(txn3.GetHash()), "already undo the block, so no coins should exists.")
+}
+
+func makeNormalTx() *tx.Tx {
+	txn := tx.NewEmptyTx()
+	Ins2 := txin.NewTxIn(outpoint.NewOutPoint(*util.GetRandHash(), 0), script.NewEmptyScript(), script.SequenceFinal)
+	txn.AddTxIn(Ins2)
+	txn.AddTxOut(txout.NewTxOut(42, script.NewEmptyScript()))
+	return txn
+}
+
+func makeUnspendableTx() *tx.Tx {
+	txn := tx.NewEmptyTx()
+	Ins2 := txin.NewTxIn(outpoint.NewOutPoint(*util.GetRandHash(), 0), script.NewEmptyScript(), script.SequenceFinal)
+	txn.AddTxIn(Ins2)
+	txn.AddTxOut(txout.NewTxOut(42, script.NewScriptRaw([]byte{opcodes.OP_RETURN})))
+	return txn
+}
+
+func makeCoinbaseTx() *tx.Tx {
 	coinbaseTx := tx.NewTx(0, 2)
-	Ins1 := txin.NewTxIn(nil, script.NewScriptRaw(make([]byte, 10)), 00000000)
-	Outs1 := txout.NewTxOut(42, script.NewScriptRaw([]byte{opcodes.OP_2MUL}))
-	Outs1.SetScriptPubKey(script.NewScriptRaw([]byte{opcodes.OP_FALSE}))
-	Ins1.PreviousOutPoint = outpoint.NewOutPoint(*util.GetRandHash(), 0)
-	Ins1.Sequence = script.SequenceFinal
-	Ins1.SetScriptSig(script.NewScriptRaw([]byte{opcodes.OP_2DROP}))
+	Ins1 := txin.NewTxIn(outpoint.NewOutPoint(util.HashZero, math.MaxUint32), script.NewEmptyScript(), script.SequenceFinal)
 	coinbaseTx.AddTxIn(Ins1)
-	coinbaseTx.AddTxOut(Outs1)
-	coinbaseTx.GetHash()
+	coinbaseTx.AddTxOut(txout.NewTxOut(42, script.NewEmptyScript()))
+	return coinbaseTx
+}
 
-	blocks.Txs = make([]*tx.Tx, 2)
-	blocks.Txs[0] = coinbaseTx
-	spew.Dump("coinbasetx", blocks.Txs[0])
-
-	prevTx0 := tx.NewEmptyTx()
-	Ins2 := txin.NewTxIn(nil, script.NewScriptRaw(make([]byte, 10)), 00000000)
-	Outs2 := txout.NewTxOut(42, script.NewScriptRaw([]byte{opcodes.OP_0NOTEQUAL}))
-	Outs2.SetScriptPubKey(script.NewScriptRaw([]byte{opcodes.OP_FALSE}))
-	Ins2.PreviousOutPoint = outpoint.NewOutPoint(*util.GetRandHash(), 0)
-	Ins2.Sequence = script.SequenceFinal
-	Ins2.SetScriptSig(script.NewScriptRaw([]byte{opcodes.OP_2DIV}))
-	prevTx0.AddTxOut(Outs2)
-	prevTx0.AddTxIn(Ins2)
-	phash := prevTx0.GetHash()
-
-	AddCoins(prevTx0, coinsMap, 100)
-
-	Ins1.PreviousOutPoint.Hash = phash
-	blocks.Txs[1] = prevTx0
-	spew.Dump("prevtx0", prevTx0)
-
-	buf := bytes.NewBuffer(nil)
-	err := blocks.Serialize(buf)
-	if err != nil {
-		t.Error("serialize block failed.")
-	}
-	blocks.GetHash()
-
-	cvt := utxo.GetUtxoCacheInstance()
-	h, err := cvt.GetBestBlock()
-	if h != randomhash {
-		t.Error("the hash value should equal")
-	}
-	if err != nil {
-		t.Error("get best block failed..")
-	}
-
-	// Now update hte UTXO set
-	undos := undo.NewBlockUndo(1)
-	UpdateUTXOSet(blocks, undos, coinsMap, chainparam, 123456)
-
-	if !HasSpendableCoin(coinsMap, coinbaseTx.GetHash()) {
-		t.Error("this coinbase transaction should have been unlocked")
-	}
-
-	UndoBlock(blocks, coinsMap, undos, chainparam, 123456)
-	if len(undos.GetTxundo()) != 1 {
-		t.Error("block undo information number should be 1, because only one common tx ")
-		return
-	}
-
-	if !HasSpendableCoin(coinsMap, prevTx0.GetHash()) {
-		t.Error("this transaction should be not spendable")
-	}
-
+func updateTipHashInUtxo(coinsMap *utxo.CoinsMap, t *testing.T) util.Hash {
+	//genesis block hash, and set genesis block to utxo
+	genesisHash := *util.GetRandHash()
+	utxo.GetUtxoCacheInstance().UpdateCoins(coinsMap, &genesisHash)
+	h, _ := utxo.GetUtxoCacheInstance().GetBestBlock()
+	assert.Equal(t, genesisHash, h)
+	return genesisHash
 }

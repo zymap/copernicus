@@ -16,12 +16,12 @@ import (
 	"os"
 )
 
-func initBlockDB() {
+func initBlockDB() (cleanup func()) {
 	path, err := ioutil.TempDir("/tmp", "blockIndex")
 	if err != nil {
 		panic(fmt.Sprintf("generate temp db path failed: %s\n", err))
 	}
-	defer os.Remove(path)
+
 	bc := &BlockTreeDBConfig{
 		Do: &db.DBOption{
 			FilePath:  path,
@@ -30,10 +30,14 @@ func initBlockDB() {
 	}
 
 	InitBlockTreeDB(bc)
+
+	return func() {
+		os.RemoveAll(path)
+	}
 }
 
 func TestWRTxIndex(t *testing.T) {
-	initBlockDB()
+	defer initBlockDB()()
 
 	// test TxIndex && init block pos
 	dbpos := block.NewDiskBlockPos(12, 12)
@@ -63,15 +67,15 @@ func TestWRTxIndex(t *testing.T) {
 }
 
 func TestWriteFlag(t *testing.T) {
-	initBlockDB()
+	defer initBlockDB()()
 	//test flag: value is false
 	err := GetInstance().WriteFlag("b", false)
 	if err != nil {
 		t.Errorf("write flag failed: %v\n", err)
 	}
 	res := GetInstance().ReadFlag("b")
-	if !res {
-		t.Errorf("the flag should is true: %v\n", res)
+	if res {
+		t.Errorf("the flag should is false: %v\n", res)
 	}
 
 	//test flag: value is true
@@ -80,13 +84,13 @@ func TestWriteFlag(t *testing.T) {
 		t.Errorf("write flag failed: %v\n", err)
 	}
 	res2 := GetInstance().ReadFlag("b")
-	if res2 {
-		t.Errorf("the flag should is false: %v\n", res2)
+	if !res2 {
+		t.Errorf("the flag should is true: %v\n", res2)
 	}
 }
 
 func TestWriteReindexing(t *testing.T) {
-	initBlockDB()
+	defer initBlockDB()()
 	//test write reindex: reindexing value is true
 	err := GetInstance().WriteReindexing(true)
 	if err != nil {
@@ -109,7 +113,7 @@ func TestWriteReindexing(t *testing.T) {
 }
 
 func TestReadBlockFileInfo(t *testing.T) {
-	initBlockDB()
+	defer initBlockDB()()
 	//the block file info exist
 	_, err := writeBlockFile()
 	if err != nil {
@@ -166,7 +170,7 @@ func writeBlockFile() (*util.Hash, error) {
 }
 
 func TestReadLastBlockFile(t *testing.T) {
-	initBlockDB()
+	defer initBlockDB()()
 	_, err := writeBlockFile()
 	if err != nil {
 		t.Errorf("write blockFileInfo failed: %v\n", err)
@@ -187,7 +191,7 @@ func TestReadLastBlockFile(t *testing.T) {
 }
 
 func TestWriteBatchSync(t *testing.T) {
-	initBlockDB()
+	defer initBlockDB()()
 	blkHeader := block.NewBlockHeader()
 	bfi1 := make(map[int32]*block.BlockFileInfo)
 	fi := block.NewBlockFileInfo()

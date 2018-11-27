@@ -20,6 +20,11 @@ func GetUtxoCacheInstance() CacheView {
 	return utxoTip
 }
 
+// Close FIXME: this is only for test. We must do it in a graceful way
+func Close() {
+	utxoTip = nil
+}
+
 type CacheView interface {
 	GetCoin(outpoint *outpoint.OutPoint) *Coin
 	HaveCoin(point *outpoint.OutPoint) bool
@@ -27,5 +32,6 @@ type CacheView interface {
 	UpdateCoins(tempCacheCoins *CoinsMap, hash *util.Hash) error
 	DynamicMemoryUsage() int64
 	GetCacheSize() int
+	RemoveCoins(outpoint *outpoint.OutPoint)
 	Flush() bool
 }

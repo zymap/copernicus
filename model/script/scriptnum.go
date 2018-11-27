@@ -74,6 +74,30 @@ func (n ScriptNum) Bytes() []byte {
 	return result
 }
 
+// GetScriptNum interprets the passed serialized bytes as an encoded integer
+// and returns the result as a script number.
+//
+// Since the consensus rules dictate that serialized bytes interpreted as ints
+// are only allowed to be in the range determined by a maximum number of bytes,
+// on a per opcode basis, an error will be returned when the provided bytes
+// would result in a number outside of that range.  In particular, the range for
+// the vast majority of opcodes dealing with numeric values are limited to 4
+// bytes and therefore will pass that value to this function resulting in an
+// allowed range of [-2^31 + 1, 2^31 - 1].
+//
+// The requireMinimal flag causes an error to be returned if additional checks
+// on the encoding determine it is not represented with the smallest possible
+// number of bytes or is the negative 0 encoding, [0x80].  For example, consider
+// the number 127.  It could be encoded as [0x7f], [0x7f 0x00],
+// [0x7f 0x00 0x00 ...], etc.  All forms except [0x7f] will return an error with
+// requireMinimal enabled.
+//
+// The scriptNumLen is the maximum number of bytes the encoded value can be
+// before an ErrStackNumberTooBig is returned.  This effectively limits the
+// range of allowed values.
+// WARNING:  Great care should be taken if passing a value larger than
+// defaultScriptNumLen, which could lead to addition and multiplication
+// overflows.
 func GetScriptNum(vch []byte, requireMinimal bool, maxNumSize int) (scriptNum *ScriptNum, err error) {
 	vchLen := len(vch)
 
@@ -85,26 +109,10 @@ func GetScriptNum(vch []byte, requireMinimal bool, maxNumSize int) (scriptNum *S
 	}
 	// one byte should > 0
 	// two bytes should > 255 or < -255
-	if requireMinimal && vchLen > 0 {
-		// Check that the number is encoded with the minimum possible
-		// number of bytes.
-		//
-		// If the most-significant-byte - excluding the sign bit - is zero
-		// then we're not minimal. Note how this test also rejects the
-		// negative-zero encoding, 0x80.
-		if vch[vchLen-1]&0x7f == 0 {
-
-			// One exception: if there's more than one byte and the most
-			// significant bit of the second-most-significant-byte is set
-			// it would conflict with the sign bit. An example of this case
-			// is +-255, which encode to 0xff00 and 0xff80 respectively.
-			// (big-endian).
-			if vchLen == 1 || (vch[vchLen-2]&0x80) == 0 {
-				log.Debug("ScriptErrNonMinimalEncodedNumber")
-				err = errcode.New(errcode.ScriptErrUnknownError)
-				scriptNum = NewScriptNum(0)
-				return
-			}
+	if requireMinimal {
+		if !IsMinimallyEncoded(vch, int64(maxNumSize)) {
+			log.Debug("ScriptNumIsNotMinimallyEncodede")
+			return NewScriptNum(0), errcode.New(errcode.ScriptErrUnknownError)
 		}
 	}
 

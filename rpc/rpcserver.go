@@ -22,9 +22,9 @@ import (
 
 	"github.com/copernet/copernicus/conf"
 	"github.com/copernet/copernicus/log"
-	"github.com/copernet/copernicus/model/mempool"
 	"github.com/copernet/copernicus/net/server"
 	"github.com/copernet/copernicus/rpc/btcjson"
+	"github.com/copernet/copernicus/util"
 )
 
 const (
@@ -67,6 +67,7 @@ type Server struct {
 	helpCacher             *helpCacher
 	requestProcessShutdown chan struct{}
 	quit                   chan int
+	timeSource             *util.MedianTime
 }
 
 func (s *Server) httpStatusLine(req *http.Request, code int) string {
@@ -373,6 +374,8 @@ func (s *Server) jsonRPCRead(w http.ResponseWriter, r *http.Request, isAdmin boo
 			if parsedCmd.err != nil {
 				jsonErr = parsedCmd.err
 			} else {
+				//log.Trace(">rpc:: %s, %+v", parsedCmd.method, parsedCmd.cmd)
+				log.Trace(">rpc:: %s", parsedCmd.method)
 				result, jsonErr = s.standardCmdResult(parsedCmd, closeChan)
 			}
 		}
@@ -486,7 +489,7 @@ type ServerConfig struct {
 	ConnMgr     server.RPCConnManager
 	// The fee estimator keeps track of how long transactions are left in
 	// the mempool before they are mined into blocks.
-	FeeEstimator *mempool.FeeEstimator
+	//FeeEstimator *mempool.FeeEstimator
 }
 
 // SetupRPCListeners returns a slice of listeners that are configured for use
@@ -605,14 +608,15 @@ func (a simpleAddr) Network() string {
 // Ensure simpleAddr implements the net.Addr interface.
 var _ net.Addr = simpleAddr{}
 
-func NewServer(config *ServerConfig) (*Server, error) {
+func NewServer(config *ServerConfig, ts *util.MedianTime) (*Server, error) {
 	rpc := Server{
 		cfg:         *config,
 		statusLines: make(map[int]string),
 		//gbtWorkState:           newGbtWorkState(config.TimeSource), // todo open
 		helpCacher:             newHelpCacher(),
 		requestProcessShutdown: make(chan struct{}, 1),
-		quit: make(chan int),
+		quit:                   make(chan int),
+		timeSource:             ts,
 	}
 	if conf.Cfg.RPC.RPCUser != "" && conf.Cfg.RPC.RPCPass != "" {
 		login := conf.Cfg.RPC.RPCUser + ":" + conf.Cfg.RPC.RPCPass
@@ -629,8 +633,10 @@ func NewServer(config *ServerConfig) (*Server, error) {
 	return &rpc, nil
 }
 
-func InitRPCServer() (*Server, error) {
+func InitRPCServer(timeSource *util.MedianTime) (*Server, error) {
 	if !conf.Cfg.P2PNet.DisableRPC {
+		registerAllRPCCommands()
+
 		// Setup listeners for the configured RPC listen addresses and
 		// TLS settings.
 		rpcListeners, err := SetupRPCListeners()
@@ -642,9 +648,9 @@ func InitRPCServer() (*Server, error) {
 		}
 
 		rpcServer, err := NewServer(&ServerConfig{
-			Listeners: rpcListeners,
-			//StartupTime: s.startupTime,
-		})
+			Listeners:   rpcListeners,
+			StartupTime: util.GetTime(),
+		}, timeSource)
 		if err != nil {
 			return nil, err
 		}

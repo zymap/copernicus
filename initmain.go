@@ -14,6 +14,7 @@ import (
 	"github.com/copernet/copernicus/model/chain"
 	"github.com/copernet/copernicus/model/mempool"
 	"github.com/copernet/copernicus/model/utxo"
+	"github.com/copernet/copernicus/model/wallet"
 	"github.com/copernet/copernicus/persist"
 	"github.com/copernet/copernicus/persist/blkdb"
 	"github.com/copernet/copernicus/persist/db"
@@ -39,7 +40,7 @@ func appInitMain(args []string) {
 
 	//init log
 	logDir := filepath.Join(conf.DataDir, log.DefaultLogDirname)
-	if !conf.ExistDataDir(logDir) {
+	if !conf.FileExists(logDir) {
 		err := os.MkdirAll(logDir, os.ModePerm)
 		if err != nil {
 			panic("logdir create failed: " + err.Error())
@@ -49,11 +50,9 @@ func appInitMain(args []string) {
 	logConf := struct {
 		FileName string `json:"filename"`
 		Level    int    `json:"level"`
-		Daily    bool   `json:"daily"`
 	}{
 		FileName: logDir + "/" + conf.Cfg.Log.FileName + ".log",
 		Level:    log.GetLevel(conf.Cfg.Log.Level),
-		Daily:    false,
 	}
 
 	configuration, err := json.Marshal(logConf)
@@ -94,6 +93,8 @@ func appInitMain(args []string) {
 
 	mempool.InitMempool()
 	crypto.InitSecp256()
+
+	wallet.InitWallet()
 
 	ltx.ScriptVerifyInit()
 	if conf.Cfg.Reindex {

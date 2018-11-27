@@ -297,3 +297,21 @@ func NewBlockIndex(blkHeader *block.BlockHeader) *BlockIndex {
 	bi.Header = *blkHeader
 	return bi
 }
+
+func (bIndex *BlockIndex) IsReplayProtectionJustEnabled() bool {
+	if bIndex.Prev == nil {
+		return false
+	}
+
+	return !model.IsReplayProtectionEnabled(bIndex.Prev.GetMedianTimePast()) &&
+		model.IsReplayProtectionEnabled(bIndex.GetMedianTimePast())
+}
+
+func (bIndex *BlockIndex) IsMagneticAnomalyJustEnabled() bool {
+	if bIndex.Prev == nil {
+		return false
+	}
+
+	return !model.IsMagneticAnomalyEnabled(bIndex.Prev.GetMedianTimePast()) &&
+		model.IsMagneticAnomalyEnabled(bIndex.GetMedianTimePast())
+}

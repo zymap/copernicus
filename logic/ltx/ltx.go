@@ -2,38 +2,42 @@ package ltx
 
 import (
 	"bytes"
-	"fmt"
-	"github.com/copernet/copernicus/logic/lscript"
-	"github.com/copernet/copernicus/model/tx"
-	"github.com/copernet/copernicus/model/utxo"
-
-	"strconv"
-
 	"encoding/hex"
+	"fmt"
+	"github.com/copernet/copernicus/model/blockindex"
+	"strconv"
+	"strings"
+	"sync"
+
 	"github.com/copernet/copernicus/conf"
 	"github.com/copernet/copernicus/crypto"
 	"github.com/copernet/copernicus/errcode"
 	"github.com/copernet/copernicus/log"
+	"github.com/copernet/copernicus/logic/lscript"
 	"github.com/copernet/copernicus/model"
 	"github.com/copernet/copernicus/model/chain"
 	"github.com/copernet/copernicus/model/consensus"
 	"github.com/copernet/copernicus/model/mempool"
 	"github.com/copernet/copernicus/model/outpoint"
+	"github.com/copernet/copernicus/model/pow"
 	"github.com/copernet/copernicus/model/script"
+	"github.com/copernet/copernicus/model/tx"
+	"github.com/copernet/copernicus/model/txin"
 	"github.com/copernet/copernicus/model/undo"
+	"github.com/copernet/copernicus/model/utxo"
 	"github.com/copernet/copernicus/util"
 	"github.com/copernet/copernicus/util/amount"
-	"github.com/pkg/errors"
 )
 
 type ScriptVerifyJob struct {
-	Tx            *tx.Tx
-	ScriptSig     *script.Script
-	ScriptPubKey  *script.Script
-	IputNum       int
-	Value         amount.Amount
-	Flags         uint32
-	ScriptChecker lscript.Checker
+	Tx                     *tx.Tx
+	ScriptSig              *script.Script
+	ScriptPubKey           *script.Script
+	IputNum                int
+	Value                  amount.Amount
+	Flags                  uint32
+	ScriptChecker          lscript.Checker
+	ScriptVerifyResultChan chan ScriptVerifyResult
 }
 
 type ScriptVerifyResult struct {
@@ -42,6 +46,11 @@ type ScriptVerifyResult struct {
 	ScriptPubKey *script.Script
 	InputNum     int
 	Err          error
+}
+
+type SignError struct {
+	TxIn   *txin.TxIn
+	ErrMsg string
 }
 
 func verifyResult(j ScriptVerifyJob, err error) ScriptVerifyResult {
@@ -53,17 +62,23 @@ const (
 )
 
 var (
-	scriptVerifyJobChan    chan ScriptVerifyJob
-	scriptVerifyResultChan chan ScriptVerifyResult
+	scriptVerifyJobChan         chan ScriptVerifyJob
+	blockScriptVerifyResultChan chan ScriptVerifyResult
+	txScriptVerifyResultChan    chan ScriptVerifyResult
 )
 
-func ScriptVerifyInit() {
-	scriptVerifyJobChan = make(chan ScriptVerifyJob, MaxScriptVerifyJobNum)
-	scriptVerifyResultChan = make(chan ScriptVerifyResult, MaxScriptVerifyJobNum)
+var once sync.Once
 
-	for i := 0; i < conf.Cfg.Script.Par; i++ {
-		go checkScript()
-	}
+func ScriptVerifyInit() {
+	once.Do(func() {
+		scriptVerifyJobChan = make(chan ScriptVerifyJob, MaxScriptVerifyJobNum)
+		blockScriptVerifyResultChan = make(chan ScriptVerifyResult, MaxScriptVerifyJobNum)
+		txScriptVerifyResultChan = make(chan ScriptVerifyResult, MaxScriptVerifyJobNum)
+
+		for i := 0; i < conf.Cfg.Script.Par; i++ {
+			go checkScript()
+		}
+	})
 }
 
 func CheckTxBeforeAcceptToMemPool(txn *tx.Tx) (*mempool.TxEntry, error) {
@@ -82,19 +97,21 @@ func CheckTxBeforeAcceptToMemPool(txn *tx.Tx) (*mempool.TxEntry, error) {
 	// check common locktime, sequence final can disable it
 	err := ContextualCheckTransactionForCurrentBlock(txn, int(tx.StandardLockTimeVerifyFlags))
 	if err != nil {
-		return nil, errcode.New(errcode.RejectNonstandard)
+		return nil, err
 	}
 
 	// is mempool already have it? conflict tx with mempool
 	gPool := mempool.GetInstance()
+	gPool.RLock()
+	defer gPool.RUnlock()
 	if gPool.FindTx(txn.GetHash()) != nil {
 		log.Debug("tx already known in mempool, hash: %s", txn.GetHash())
 		return nil, errcode.NewError(errcode.RejectAlreadyKnown, "txn-already-in-mempool")
 	}
 
-	for _, txin := range txn.GetIns() {
-		if gPool.HasSpentOut(txin.PreviousOutPoint) {
-			log.Debug("tx ins alread spent out in mempool, tx hash:%s", txn.GetHash())
+	for _, e := range txn.GetIns() {
+		if gPool.HasSpentOut(e.PreviousOutPoint) {
+			log.Debug("tx ins alread spent out in mempool")
 			return nil, errcode.NewError(errcode.RejectConflict, "txn-mempool-conflict")
 		}
 	}
@@ -134,7 +151,7 @@ func CheckTxBeforeAcceptToMemPool(txn *tx.Tx) (*mempool.TxEntry, error) {
 
 	//check standard inputs
 	if model.ActiveNetParams.RequireStandard {
-		if areInputsStandard(txn, inputCoins) {
+		if !AreInputsStandard(txn, inputCoins) {
 			return nil, errcode.NewError(errcode.RejectNonstandard, "bad-txns-nonstandard-inputs")
 		}
 	}
@@ -160,15 +177,13 @@ func CheckTxBeforeAcceptToMemPool(txn *tx.Tx) (*mempool.TxEntry, error) {
 
 	var extraFlags uint32 = script.ScriptVerifyNone
 	tip := chain.GetInstance().Tip()
-	//if chainparams.IsMagneticAnomalyEnable(tip.GetMedianTimePast()) {
-	//	extraFlags |= script.ScriptEnableCheckDataSig
-	//}
-	if model.IsMonolithEnabled(tip.GetMedianTimePast()) {
-		extraFlags |= script.ScriptEnableMonolithOpcodes
-	}
 
 	if model.IsReplayProtectionEnabled(tip.GetMedianTimePast()) {
 		extraFlags |= script.ScriptEnableReplayProtection
+	}
+
+	if model.IsMagneticAnomalyEnabled(tip.GetMedianTimePast()) {
+		extraFlags |= script.ScriptEnableCheckDataSig
 	}
 
 	//check inputs
@@ -180,7 +195,7 @@ func CheckTxBeforeAcceptToMemPool(txn *tx.Tx) (*mempool.TxEntry, error) {
 
 	// Check against previous transactions. This is done last to help
 	// prevent CPU exhaustion denial-of-service attacks.
-	err = checkInputs(txn, inputCoins, scriptVerifyFlags)
+	err = checkInputs(txn, inputCoins, scriptVerifyFlags, txScriptVerifyResultChan)
 	if err != nil {
 		return nil, err
 	}
@@ -201,12 +216,12 @@ func CheckTxBeforeAcceptToMemPool(txn *tx.Tx) (*mempool.TxEntry, error) {
 	// invalid blocks (using TestBlockValidity), however allowing such
 	// transactions into the mempool can be exploited as a DoS attack.
 	var currentBlockScriptVerifyFlags = chain.GetInstance().GetBlockScriptFlags(tip)
-	err = checkInputs(txn, inputCoins, currentBlockScriptVerifyFlags)
+	err = checkInputs(txn, inputCoins, currentBlockScriptVerifyFlags, txScriptVerifyResultChan)
 	if err != nil {
 		if ((^scriptVerifyFlags) & currentBlockScriptVerifyFlags) == 0 {
 			return nil, errcode.New(errcode.ScriptCheckInputsBug)
 		}
-		err = checkInputs(txn, inputCoins, uint32(script.MandatoryScriptVerifyFlags)|extraFlags)
+		err = checkInputs(txn, inputCoins, uint32(script.MandatoryScriptVerifyFlags)|extraFlags, txScriptVerifyResultChan)
 		if err != nil {
 			return nil, err
 		}
@@ -251,36 +266,31 @@ func CheckBlockTransactions(txs []*tx.Tx, maxBlockSigOps uint64) error {
 	txsLen := len(txs)
 	if txsLen == 0 {
 		log.Debug("block has no transactions")
-		return errcode.New(errcode.RejectInvalid)
+		return errcode.NewError(errcode.RejectInvalid, "bad-cb-missing")
 	}
 	err := txs[0].CheckCoinbaseTransaction()
 	if err != nil {
 		return err
 	}
-	sigOps := txs[0].GetSigOpCountWithoutP2SH()
-	outPointSet := make(map[outpoint.OutPoint]bool)
+	sigOps := txs[0].GetSigOpCountWithoutP2SH(uint32(script.StandardScriptVerifyFlags))
+
+	TxsInputOutpoint := make(map[outpoint.OutPoint]bool)
 	for i, transaction := range txs[1:] {
-		sigOps += txs[i+1].GetSigOpCountWithoutP2SH()
+		sigOps += txs[i+1].GetSigOpCountWithoutP2SH(uint32(script.StandardScriptVerifyFlags))
 		if uint64(sigOps) > maxBlockSigOps {
 			log.Debug("block has too many sigOps:%d", sigOps)
-			return errcode.New(errcode.RejectInvalid)
+			return errcode.NewError(errcode.RejectInvalid, "bad-blk-sigops")
 		}
-		err := transaction.CheckRegularTransaction()
+
+		err := transaction.CheckRegularTransactionWhenNewBlock(TxsInputOutpoint)
 		if err != nil {
 			return err
 		}
-
-		// check dup input
-		err = transaction.CheckDuplicateIns(&outPointSet)
-		if err != nil {
-			return err
-		}
-
 	}
 	return nil
 }
 
-func ContextureCheckBlockTransactions(txs []*tx.Tx, blockHeight int32, blockLockTime int64) error {
+func ContextureCheckBlockTransactions(txs []*tx.Tx, blockHeight int32, blockLockTime, mediaTimePast int64) error {
 	txsLen := len(txs)
 	if txsLen == 0 {
 		log.Debug("no transactions err")
@@ -291,8 +301,24 @@ func ContextureCheckBlockTransactions(txs []*tx.Tx, blockHeight int32, blockLock
 		return err
 	}
 
-	for _, transaction := range txs[1:] {
-		err = ContextualCheckTransaction(transaction, blockHeight, blockLockTime)
+	var prevTx *tx.Tx
+	for _, transaction := range txs {
+		if model.IsMagneticAnomalyEnabled(mediaTimePast) {
+			if prevTx != nil {
+				transactionHash := transaction.GetHash()
+				prevTxHash := prevTx.GetHash()
+				if pow.HashToBig(&transactionHash).Cmp(pow.HashToBig(&prevTxHash)) < 0 {
+					return fmt.Errorf(
+						"bad-ordering: transaction order is invalid(%s <%s) in block(height %d)",
+						transaction.GetHash().String(), prevTx.GetHash().String(), blockHeight)
+				}
+			}
+			if prevTx != nil || !transaction.IsCoinBase() {
+				prevTx = transaction
+			}
+		}
+
+		err = ContextualCheckTransaction(transaction, blockHeight, blockLockTime, mediaTimePast)
 		if err != nil {
 			return err
 		}
@@ -300,79 +326,116 @@ func ContextureCheckBlockTransactions(txs []*tx.Tx, blockHeight int32, blockLock
 	return nil
 }
 
-func ApplyBlockTransactions(txs []*tx.Tx, bip30Enable bool, scriptCheckFlags uint32, needCheckScript bool,
-	blockSubSidy amount.Amount, blockHeight int32, blockMaxSigOpsCount uint64) (coinMap *utxo.CoinsMap, bundo *undo.BlockUndo, err error) {
+func ApplyBlockTransactions(txs []*tx.Tx, bip30Enable bool, scriptCheckFlags uint32,
+	needCheckScript bool, blockSubSidy amount.Amount, blockHeight int32, blockMaxSigOpsCount uint64,
+	lockTimeFlags uint32, pindex *blockindex.BlockIndex) (coinMap *utxo.CoinsMap, bundo *undo.BlockUndo, err error) {
+
 	// make view
 	coinsMap := utxo.NewEmptyCoinsMap()
-	utxo := utxo.GetUtxoCacheInstance()
-	sigOpsCount := uint64(0)
+	utxoCache := utxo.GetUtxoCacheInstance()
+	sigOpsCount := 0
 	var fees amount.Amount
 	bundo = undo.NewBlockUndo(0)
-	txUndoList := make([]*undo.TxUndo, 0, len(txs)-1)
-	//updateCoins
-	for i, transaction := range txs {
-		// check BIP30: do not allow overwriting unspent old transactions
-		if bip30Enable {
+
+	// check BIP30: do not allow overwriting unspent old transactions
+	if bip30Enable {
+		for _, transaction := range txs {
 			outs := transaction.GetOuts()
 			for i := range outs {
-				if utxo.HaveCoin(outpoint.NewOutPoint(transaction.GetHash(), uint32(i))) {
+				if utxoCache.HaveCoin(outpoint.NewOutPoint(transaction.GetHash(), uint32(i))) {
 					log.Debug("tried to overwrite transaction")
-					return nil, nil, errcode.New(errcode.RejectInvalid)
+					return nil, nil, errcode.NewError(errcode.RejectInvalid, "bad-txns-BIP30")
 				}
 			}
 		}
-		var valueIn amount.Amount
-		if !transaction.IsCoinBase() {
-			ins := transaction.GetIns()
-			for _, in := range ins {
-				coin := coinsMap.FetchCoin(in.PreviousOutPoint)
-				if coin == nil || coin.IsSpent() {
-					log.Debug("can't find coin or has been spent out before apply transaction")
-					return nil, nil, errcode.New(errcode.RejectInvalid)
-				}
-				valueIn += coin.GetAmount()
-			}
-			coinHeight, coinTime := CalculateSequenceLocks(transaction, coinsMap, scriptCheckFlags)
-			if !CheckSequenceLocks(coinHeight, coinTime) {
-				log.Debug("block contains a non-bip68-final transaction")
-				return nil, nil, errcode.New(errcode.RejectNonstandard)
+	}
+
+	txUndoList := make([]*undo.TxUndo, 0, len(txs)-1)
+	isMagneticAnomalyEnabled := model.IsMagneticAnomalyEnabled(pindex.GetMedianTimePast())
+
+	for _, ptx := range txs {
+		//pos := block.DiskTxPos{
+		//	BlockIn:    &blkPos,
+		//	TxOffsetIn: util.VarIntSerializeSize(uint64(len(txs))),
+		//}
+		//vPos = make(map[util.Hash]block.DiskTxPos)
+		//pos = vPos[ptx.GetHash()]
+		//pos.TxOffsetIn += ptx.EncodeSize()
+
+		if ptx.IsCoinBase() {
+			// We've already checked for sigops count before P2SH in CheckBlock.
+			sigOpsCount += ptx.GetSigOpCountWithoutP2SH(scriptCheckFlags)
+		}
+
+		if isMagneticAnomalyEnabled || ptx.IsCoinBase() {
+			TxAddCoins(ptx, coinsMap, blockHeight)
+		}
+	}
+
+	for i, transaction := range txs {
+		if transaction.IsCoinBase() {
+			continue
+		}
+		ins := transaction.GetIns()
+		for _, in := range ins {
+			coin := coinsMap.FetchCoin(in.PreviousOutPoint)
+			if coin == nil || coin.IsSpent() {
+				log.Debug("can't find coin or has been spent out before apply transaction: %+v", in.PreviousOutPoint)
+				return nil, nil, errcode.NewError(errcode.RejectInvalid, "bad-txns-inputs-missingorspent")
 			}
 		}
-		//check sigops
+
+		// Check that transaction is BIP68 final BIP68 lock checks (as
+		// opposed to nLockTime checks) must be in ConnectBlock because they
+		// require the UTXO set.
+		coinHeight, coinTime := CalculateSequenceLocks(transaction, coinsMap, lockTimeFlags)
+		if !CheckSequenceLocks(coinHeight, coinTime) {
+			log.Debug("block contains a non-bip68-final transaction")
+			return nil, nil, errcode.NewError(errcode.RejectInvalid, "bad-txns-nonfinal")
+		}
+
+		// GetTransactionSigOpCount counts 2 types of sigops:
+		// * legacy (always)
+		// * p2sh (when P2SH enabled in flags and excludes coinbase)
 		sigsCount := GetTransactionSigOpCount(transaction, scriptCheckFlags, coinsMap)
 		if sigsCount > tx.MaxTxSigOpsCounts {
 			log.Debug("transaction has too many sigops")
-			return nil, nil, errcode.New(errcode.RejectInvalid)
+			return nil, nil, errcode.NewError(errcode.RejectInvalid, "bad-txn-sigops")
 		}
-		sigOpsCount += uint64(sigsCount)
-		if sigOpsCount > blockMaxSigOpsCount {
+		sigOpsCount += sigsCount
+		if sigOpsCount > int(blockMaxSigOpsCount) {
 			log.Debug("block has too many sigops at %d transaction", i)
-			return nil, nil, errcode.New(errcode.RejectInvalid)
-		}
-		if transaction.IsCoinBase() {
-			UpdateTxCoins(transaction, coinsMap, nil, blockHeight)
-			continue
+			return nil, nil, errcode.NewError(errcode.RejectInvalid, "bad-blk-sigops")
 		}
 
-		fees += valueIn - transaction.GetValueOut()
+		fee := coinsMap.GetValueIn(transaction) - transaction.GetValueOut()
+		fees += fee
+
 		if needCheckScript {
 			//check inputs
-			err := checkInputs(transaction, coinsMap, scriptCheckFlags)
+			err := checkInputs(transaction, coinsMap, scriptCheckFlags, blockScriptVerifyResultChan)
 			if err != nil {
+				if strings.Contains(err.Error(), "script-verify") {
+					return nil, nil, errcode.NewError(errcode.RejectInvalid, "blk-bad-inputs")
+				}
 				return nil, nil, err
 			}
 		}
 
 		//update temp coinsMap
 		txundo := undo.NewTxUndo()
-		UpdateTxCoins(transaction, coinsMap, txundo, blockHeight)
 		txUndoList = append(txUndoList, txundo)
+		TxSpendCoins(transaction, coinsMap, txundo)
+		if !isMagneticAnomalyEnabled {
+			TxAddCoins(transaction, coinsMap, blockHeight)
+		}
 	}
 	bundo.SetTxUndo(txUndoList)
 	//check blockReward
 	if txs[0].GetValueOut() > fees+blockSubSidy {
-		log.Debug("coinbase pays too much")
-		return nil, nil, errcode.New(errcode.RejectInvalid)
+		log.Debug("coinbase pays too much: coinbase out:%d fee:%d expected:%d txcnt(%d)",
+			txs[0].GetValueOut(), fees, fees+blockSubSidy, len(txs))
+		return nil, nil, errcode.NewError(errcode.RejectInvalid, "bad-cb-amount")
 	}
 	return coinsMap, bundo, nil
 }
@@ -390,18 +453,18 @@ func contextureCheckBlockCoinBaseTransaction(tx *tx.Tx, blockHeight int32) error
 		heightScript.PushScriptNum(heightNumb)
 		if coinBaseScriptSig.Size() < heightScript.Size() {
 			log.Debug("coinbase err, not start with blockheight")
-			return errcode.New(errcode.RejectInvalid)
+			return errcode.NewError(errcode.RejectInvalid, "bad-cb-height")
 		}
 		scriptData := coinBaseScriptSig.GetData()[:heightScript.Size()]
 		if !bytes.Equal(scriptData, heightScript.GetData()) {
 			log.Debug("coinbase err, not start with blockheight")
-			return errcode.New(errcode.RejectInvalid)
+			return errcode.NewError(errcode.RejectInvalid, "bad-cb-height")
 		}
 	}
 	return nil
 }
 
-func ContextualCheckTransaction(txn *tx.Tx, nBlockHeight int32, nLockTimeCutoff int64) error {
+func ContextualCheckTransaction(txn *tx.Tx, nBlockHeight int32, nLockTimeCutoff, mediaTimePast int64) error {
 	if !txn.IsFinal(nBlockHeight, nLockTimeCutoff) {
 		log.Debug("txn is not final, hash: %s", txn.GetHash())
 		return errcode.NewError(errcode.RejectInvalid, "bad-txns-nonfinal")
@@ -414,6 +477,14 @@ func ContextualCheckTransaction(txn *tx.Tx, nBlockHeight int32, nLockTimeCutoff 
 	//	}
 	//}
 
+	if model.IsMagneticAnomalyEnabled(mediaTimePast) {
+		txnsize := txn.SerializeSize()
+		if txnsize < consensus.MinTxSize {
+			e := fmt.Sprintf("bad-txns-undersize: tx(%d) should be equal to or greater than %d",
+				txnsize, consensus.MinTxSize)
+			return errcode.NewError(errcode.RejectInvalid, e)
+		}
+	}
 	return nil
 }
 
@@ -467,23 +538,19 @@ func inputCoinsOf(txn *tx.Tx) (coinMap *utxo.CoinsMap, missingInput bool, spendC
 }
 
 func GetTransactionSigOpCount(txn *tx.Tx, flags uint32, coinMap *utxo.CoinsMap) int {
-	var sigOpsCount int
-	if flags&script.ScriptVerifyP2SH == script.ScriptVerifyP2SH {
-		sigOpsCount = GetSigOpCountWithP2SH(txn, coinMap)
-	} else {
-		sigOpsCount = txn.GetSigOpCountWithoutP2SH()
-	}
+	sigOpsCount := txn.GetSigOpCountWithoutP2SH(flags) + getP2SHSigOpCount(txn, flags, coinMap)
 
 	return sigOpsCount
 }
 
-// GetSigOpCountWithP2SH starting BIP16(Apr 1 2012), we should check p2sh
-func GetSigOpCountWithP2SH(txn *tx.Tx, coinMap *utxo.CoinsMap) int {
-	n := txn.GetSigOpCountWithoutP2SH()
-	if txn.IsCoinBase() {
-		return n
+// Get tx's P2SH SigOpCount
+func getP2SHSigOpCount(txn *tx.Tx, flags uint32, coinMap *utxo.CoinsMap) int {
+
+	if (flags&script.ScriptVerifyP2SH) == 0 || txn.IsCoinBase() {
+		return 0
 	}
 
+	var n int
 	for _, txin := range txn.GetIns() {
 		coin := coinMap.GetCoin(txin.PreviousOutPoint)
 		if coin == nil {
@@ -492,7 +559,7 @@ func GetSigOpCountWithP2SH(txn *tx.Tx, coinMap *utxo.CoinsMap) int {
 
 		scriptPubKey := coin.GetScriptPubKey()
 		if scriptPubKey.IsPayToScriptHash() {
-			sigsCount := scriptPubKey.GetSigOpCount(true)
+			sigsCount := scriptPubKey.GetPubKeyP2SHSigOpCount(flags, txin.GetScriptSig())
 			n += sigsCount
 		}
 	}
@@ -527,10 +594,11 @@ func ContextualCheckTransactionForCurrentBlock(transaction *tx.Tx, flags int) er
 
 	nBlockHeight := activeChain.Height() + 1
 
-	return ContextualCheckTransaction(transaction, nBlockHeight, nLockTimeCutoff)
+	return ContextualCheckTransaction(transaction, nBlockHeight,
+		nLockTimeCutoff, activeChain.Tip().GetMedianTimePast())
 }
 
-func areInputsStandard(transaction *tx.Tx, coinsMap *utxo.CoinsMap) bool {
+func AreInputsStandard(transaction *tx.Tx, coinsMap *utxo.CoinsMap) bool {
 	ins := transaction.GetIns()
 	for i, e := range ins {
 		coin := coinsMap.GetCoin(e.PreviousOutPoint)
@@ -541,19 +609,26 @@ func areInputsStandard(transaction *tx.Tx, coinsMap *utxo.CoinsMap) bool {
 		txOut := coin.GetTxOut()
 		pubKeyType, isStandard := txOut.GetPubKeyType()
 		if !isStandard {
-			log.Debug("areInputsStandard GetPubkeyType err: not StandardScriptPubKey")
+			log.Debug("AreInputsStandard GetPubkeyType err: not StandardScriptPubKey")
 			return false
 		}
 		if pubKeyType == script.ScriptHash {
 			scriptSig := e.GetScriptSig()
-			err := lscript.EvalScript(util.NewStack(), scriptSig, transaction, i, amount.Amount(0), script.ScriptVerifyNone,
+			stack := util.NewStack()
+			err := lscript.EvalScript(stack, scriptSig, transaction, i, amount.Amount(0), script.ScriptVerifyNone,
 				lscript.NewScriptEmptyChecker())
 			if err != nil {
-				log.Debug("areInputsStandard EvalScript err: %v", err)
+				log.Debug("AreInputsStandard EvalScript err: %v", err)
 				return false
 			}
+
+			if stack.Empty() {
+				log.Trace("AreInputsStandard: empty stack after EvalScript")
+				return false
+			}
+
 			subScript := script.NewScriptRaw(scriptSig.ParsedOpCodes[len(scriptSig.ParsedOpCodes)-1].Data)
-			opCount := subScript.GetSigOpCount(true)
+			opCount := subScript.GetSigOpCount(uint32(script.StandardCheckDataSigVerifyFlags), true)
 			if uint(opCount) > tx.MaxP2SHSigOps {
 				log.Debug("transaction has too many sigops")
 				return false
@@ -564,12 +639,14 @@ func areInputsStandard(transaction *tx.Tx, coinsMap *utxo.CoinsMap) bool {
 	return true
 }
 
-func checkInputs(tx *tx.Tx, tempCoinMap *utxo.CoinsMap, flags uint32) error {
+func checkInputs(tx *tx.Tx, tempCoinMap *utxo.CoinsMap, flags uint32,
+	scriptVerifyResultChan chan ScriptVerifyResult) error {
 	//check inputs money range
 	bestBlockHash, _ := utxo.GetUtxoCacheInstance().GetBestBlock()
 	spendHeight := chain.GetInstance().GetSpendHeight(&bestBlockHash)
 	if spendHeight == -1 {
-		return errors.New("indexMap can`t find block")
+		log.Debug("indexMap can`t find bestblock")
+		return errcode.New(errcode.RejectInvalid)
 	}
 
 	err := CheckInputsMoney(tx, tempCoinMap, spendHeight)
@@ -580,56 +657,50 @@ func checkInputs(tx *tx.Tx, tempCoinMap *utxo.CoinsMap, flags uint32) error {
 	ins := tx.GetIns()
 	insLen := len(ins)
 
-	if insLen <= MaxScriptVerifyJobNum {
-		for i := 0; i < insLen; i++ {
-			coin := tempCoinMap.GetCoin(ins[i].PreviousOutPoint)
+	batches := insLen / MaxScriptVerifyJobNum
+	reminder := insLen % MaxScriptVerifyJobNum
+	if reminder > 0 {
+		batches++
+	}
+
+	for batch := 0; batch < batches; batch++ {
+
+		jobNum := MaxScriptVerifyJobNum
+		if batch+1 == batches && reminder > 0 {
+			jobNum = reminder
+		}
+
+		for j := 0; j < jobNum; j++ {
+			index := batch*MaxScriptVerifyJobNum + j
+
+			coin := tempCoinMap.GetCoin(ins[index].PreviousOutPoint)
 			if coin == nil {
 				panic("can't find coin in temp coinsmap")
 			}
 			scriptPubKey := coin.GetScriptPubKey()
-			scriptSig := ins[i].GetScriptSig()
-			scriptVerifyJobChan <- ScriptVerifyJob{tx, scriptSig, scriptPubKey, i,
-				coin.GetAmount(), flags, lscript.NewScriptRealChecker()}
+			scriptSig := ins[index].GetScriptSig()
+			log.Debug("Push Script verify job txid: %s, inex: %d", tx.GetHash().String(), index)
+			scriptVerifyJobChan <- ScriptVerifyJob{tx, scriptSig, scriptPubKey, index,
+				coin.GetAmount(), flags, lscript.NewScriptRealChecker(), scriptVerifyResultChan}
 		}
 
-		for j := 0; j < insLen; j++ {
+		var err error
+
+		//drain all result from channel
+		for k := 0; k < jobNum; k++ {
 			result := <-scriptVerifyResultChan
 			if result.Err != nil {
-				return result.Err
+				log.Debug("Read script verify err result: %v, tx hash: %s, index: %d, "+
+					"len of scriptVerifyResultChan: %d", result.Err, result.TxHash.String(),
+					result.InputNum, len(scriptVerifyResultChan))
+				if err == nil {
+					err = result.Err
+				}
 			}
 		}
-		return nil
-	}
 
-	multipleNum := insLen / MaxScriptVerifyJobNum
-	remainderNum := insLen % MaxScriptVerifyJobNum
-	if remainderNum > 0 {
-		multipleNum++
-	}
-
-	for i := 0; i < multipleNum; i++ {
-		var lineCount int
-		if i+1 == multipleNum && remainderNum > 0 {
-			lineCount = remainderNum
-		} else {
-			lineCount = MaxScriptVerifyJobNum
-		}
-		for j := 0; j < lineCount; j++ {
-			coin := tempCoinMap.GetCoin(ins[i*MaxScriptVerifyJobNum+j].PreviousOutPoint)
-			if coin == nil {
-				panic("can't find coin in temp coinsmap")
-			}
-			scriptPubKey := coin.GetScriptPubKey()
-			scriptSig := ins[i].GetScriptSig()
-			scriptVerifyJobChan <- ScriptVerifyJob{tx, scriptSig, scriptPubKey,
-				i*MaxScriptVerifyJobNum + j, coin.GetAmount(), flags,
-				lscript.NewScriptRealChecker()}
-		}
-		for h := 0; h < lineCount; h++ {
-			result := <-scriptVerifyResultChan
-			if result.Err != nil {
-				return result.Err
-			}
+		if err != nil {
+			return err
 		}
 	}
 
@@ -644,22 +715,20 @@ func checkScript() {
 		if err1 != nil {
 
 			hasNonMandatoryFlags := (j.Flags & uint32(script.StandardNotMandatoryVerifyFlags)) != 0
-			doesNotHaveMonolith := j.Flags&script.ScriptEnableMonolithOpcodes == 0
-			if hasNonMandatoryFlags || doesNotHaveMonolith {
-
-				fallbackFlags := uint32(uint64(j.Flags)&uint64(^script.StandardNotMandatoryVerifyFlags) | script.ScriptEnableMonolithOpcodes)
+			if hasNonMandatoryFlags {
+				fallbackFlags := uint32(uint64(j.Flags) & uint64(^script.StandardNotMandatoryVerifyFlags))
 				err2 := lscript.VerifyScript(j.Tx, j.ScriptSig, j.ScriptPubKey, j.IputNum, j.Value, fallbackFlags, j.ScriptChecker)
 				if err2 == nil {
-					scriptVerifyResultChan <- verifyResult(j, errorNonMandatoryPass(j, err1))
-					return
+					j.ScriptVerifyResultChan <- verifyResult(j, errorNonMandatoryPass(j, err1))
+					continue
 				}
 			}
 
-			scriptVerifyResultChan <- verifyResult(j, errorMandatoryFailed(j, err1))
-			return
+			j.ScriptVerifyResultChan <- verifyResult(j, errorMandatoryFailed(j, err1))
+			continue
 		}
 
-		scriptVerifyResultChan <- verifyResult(j, nil)
+		j.ScriptVerifyResultChan <- verifyResult(j, nil)
 	}
 }
 
@@ -830,23 +899,27 @@ func CheckInputsMoney(transaction *tx.Tx, coinsMap *utxo.CoinsMap, spendHeight i
 			log.Debug("CheckInputsMoney can't find coin")
 			panic("CheckInputsMoney can't find coin")
 		}
+
 		if coin.IsCoinBase() {
 			if spendHeight-coin.GetHeight() < consensus.CoinbaseMaturity {
 				log.Debug("CheckInputsMoney coinbase can't spend now")
 				return errcode.NewError(errcode.RejectInvalid, "bad-txns-premature-spend-of-coinbase")
 			}
 		}
-		txOut := coin.GetTxOut()
-		if !amount.MoneyRange(txOut.GetValue()) {
+
+		coinOut := coin.GetTxOut()
+		if !amount.MoneyRange(coinOut.GetValue()) {
 			log.Debug("CheckInputsMoney coin money range err")
 			return errcode.NewError(errcode.RejectInvalid, "bad-txns-inputvalues-outofrange")
 		}
-		nValue += txOut.GetValue()
+
+		nValue += coinOut.GetValue()
 		if !amount.MoneyRange(nValue) {
 			log.Debug("CheckInputsMoney total coin money range err")
 			return errcode.NewError(errcode.RejectInvalid, "bad-txns-inputvalues-outofrange")
 		}
 	}
+
 	if nValue < transaction.GetValueOut() {
 		log.Debug("CheckInputsMoney coins money little than out's")
 		return errcode.NewError(errcode.RejectInvalid, "bad-txns-in-belowout")
@@ -860,67 +933,84 @@ func CheckInputsMoney(transaction *tx.Tx, coinsMap *utxo.CoinsMap, spendHeight i
 	return nil
 }
 
-// SignRawTransaction txs, preouts, private key, hash type
-func SignRawTransaction(transaction *tx.Tx, redeemScripts map[string]string, keys map[string]*crypto.PrivateKey,
-	hashType uint32) (err error) {
-	coinMap := utxo.NewEmptyCoinsMap()
-	ins := transaction.GetIns()
-	for i, in := range ins {
-		coin := coinMap.FetchCoin(in.PreviousOutPoint)
-		if coin == nil || coin.IsSpent() {
-			log.Debug("TxErrNoPreviousOut")
-			return errcode.New(errcode.TxErrNoPreviousOut)
+func isCoinValid(coin *utxo.Coin, out *outpoint.OutPoint) bool {
+	if coin == nil {
+		return false
+	}
+	if coin.IsMempoolCoin() {
+		return !mempool.GetInstance().HasSpentOut(out)
+	}
+	return !coin.IsSpent()
+}
+
+func SignRawTransaction(transactions []*tx.Tx, redeemScripts map[outpoint.OutPoint]*script.Script,
+	keyStore *crypto.KeyStore, coinsMap *utxo.CoinsMap, hashType uint32) []*SignError {
+	var err error
+	var signErrors []*SignError
+
+	mergedTx := transactions[0]
+	hashSingle := int(hashType) & ^(crypto.SigHashAnyoneCanpay|crypto.SigHashForkID) == crypto.SigHashSingle
+
+	for index, in := range mergedTx.GetIns() {
+		coin := coinsMap.GetCoin(in.PreviousOutPoint)
+		if !isCoinValid(coin, in.PreviousOutPoint) {
+			signErrors = append(signErrors, &SignError{
+				TxIn:   in,
+				ErrMsg: "Input not found or already spent",
+			})
+			continue
 		}
-		prevPubKey := coin.GetScriptPubKey()
-		var scriptSig *script.Script
-		var sigData [][]byte
-		var scriptType int
-		if hashType&(^(uint32(crypto.SigHashAnyoneCanpay)|crypto.SigHashForkID)) != crypto.SigHashSingle ||
-			i < transaction.GetOutsCount() {
-			sigData, scriptType, err = transaction.SignStep(redeemScripts, keys, hashType, prevPubKey,
-				i, coin.GetAmount())
+
+		scriptSig := script.NewEmptyScript()
+		scriptPubKey := coin.GetScriptPubKey()
+		value := coin.GetAmount()
+
+		// Only sign SIGHASH_SINGLE if there's a corresponding output
+		if !hashSingle || index < mergedTx.GetOutsCount() {
+			redeemScript := redeemScripts[*in.PreviousOutPoint]
+			// Sign what we can
+			sigData, err := mergedTx.SignStep(index, keyStore, redeemScript, hashType, scriptPubKey, value)
 			if err != nil {
-				return err
-			}
-			// get signatures and redeemscript
-			if scriptType == script.ScriptHash {
-				redeemScriptPubKey := script.NewScriptRaw(sigData[0])
-				var redeemScriptType int
-				sigData, redeemScriptType, err = transaction.SignStep(redeemScripts, keys, hashType,
-					redeemScriptPubKey, i, coin.GetAmount())
+				log.Info("SignStep error:%s", err.Error())
+			} else {
+				scriptSig.PushMultData(sigData)
+				err = lscript.VerifyScript(mergedTx, scriptSig, scriptPubKey, index, value,
+					uint32(script.StandardScriptVerifyFlags), lscript.NewScriptRealChecker())
 				if err != nil {
-					return err
+					scriptSig = script.NewEmptyScript()
+					log.Info("VerifyScript error:%s", err.Error())
 				}
-				if redeemScriptType == script.ScriptHash {
-					log.Debug("TxErrSignRawTransaction")
-					return errcode.New(errcode.TxErrSignRawTransaction)
-				}
-				sigData = append(sigData, redeemScriptPubKey.GetData())
 			}
 		}
-		scriptSig = script.NewEmptyScript()
-		scriptSig.PushMultData(sigData)
-		err = lscript.VerifyScript(transaction, scriptSig, prevPubKey, i, coin.GetAmount(),
+
+		// ... and merge in other signatures
+		for _, transaction := range transactions {
+			if len(transaction.GetIns()) > index {
+				scriptSig, err = CombineSignature(transaction, scriptPubKey, scriptSig,
+					transaction.GetIns()[index].GetScriptSig(), index, value,
+					uint32(script.StandardScriptVerifyFlags), lscript.NewScriptRealChecker())
+				if err != nil {
+					log.Info("CombineSignature error:%s", err.Error())
+				}
+			}
+		}
+
+		err = mergedTx.UpdateInScript(index, scriptSig)
+		if err != nil {
+			log.Info("UpdateInScript error:%s", err.Error())
+		}
+
+		err = lscript.VerifyScript(mergedTx, scriptSig, scriptPubKey, index, value,
 			uint32(script.StandardScriptVerifyFlags), lscript.NewScriptRealChecker())
 		if err != nil {
-			return err
-		}
-		scriptSig, err = CombineSignature(transaction, prevPubKey, scriptSig, transaction.GetIns()[i].GetScriptSig(),
-			i, coin.GetAmount(), uint32(script.StandardScriptVerifyFlags), lscript.NewScriptRealChecker())
-		if err != nil {
-			return err
-		}
-		err = transaction.UpdateInScript(i, scriptSig)
-		if err != nil {
-			return err
-		}
-		err = lscript.VerifyScript(transaction, scriptSig, prevPubKey, i, coin.GetAmount(),
-			uint32(script.StandardScriptVerifyFlags), lscript.NewScriptRealChecker())
-		if err != nil {
-			return err
+			signErrors = append(signErrors, &SignError{
+				TxIn:   in,
+				ErrMsg: err.Error(),
+			})
+			continue
 		}
 	}
-	return
+	return signErrors
 }
 
 func CombineSignature(transaction *tx.Tx, prevPubKey *script.Script, scriptSig *script.Script,
@@ -997,16 +1087,10 @@ func CombineSignature(transaction *tx.Tx, prevPubKey *script.Script, scriptSig *
 		return scriptResult, nil
 	}
 	if pubKeyType == script.ScriptHash {
-		if len(scriptSig.ParsedOpCodes) == 0 {
+		if scriptSig.Size() == 0 {
 			return txOldScriptSig, nil
 		}
-		if len(scriptSig.ParsedOpCodes[0].Data) == 0 {
-			return txOldScriptSig, nil
-		}
-		if len(txOldScriptSig.ParsedOpCodes) == 0 {
-			return scriptSig, nil
-		}
-		if len(txOldScriptSig.ParsedOpCodes[0].Data) == 0 {
+		if txOldScriptSig.Size() == 0 {
 			return scriptSig, nil
 		}
 		redeemScript := script.NewScriptRaw(scriptSig.ParsedOpCodes[len(scriptSig.ParsedOpCodes)-1].Data)

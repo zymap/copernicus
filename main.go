@@ -19,6 +19,7 @@ import (
 	"github.com/copernet/copernicus/net/limits"
 	"github.com/copernet/copernicus/net/server"
 	"github.com/copernet/copernicus/rpc"
+	"github.com/copernet/copernicus/util"
 	"net"
 )
 
@@ -45,13 +46,15 @@ func bchMain(ctx context.Context, args []string) error {
 	}()
 	interrupt := interruptListener()
 
-	s, err := server.NewServer(model.ActiveNetParams, interrupt)
+	timeSource := util.GetTimeSource()
+	s, err := server.NewServer(model.ActiveNetParams, timeSource, interrupt)
 	if err != nil {
+		fmt.Printf("Init server error: %s \n", err.Error())
 		return err
 	}
 	var rpcServer *rpc.Server
 	if !conf.Cfg.P2PNet.DisableRPC {
-		rpcServer, err = rpc.InitRPCServer()
+		rpcServer, err = rpc.InitRPCServer(timeSource)
 		if err != nil {
 			return errors.New("failed to init rpc")
 		}
@@ -92,9 +95,11 @@ func main() {
 	debug.SetGCPercent(10)
 
 	// Up some limits.
-	if err := limits.SetLimits(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to set limits: %v\n", err)
-		os.Exit(1)
+	if runtime.GOOS != "plan9" && runtime.GOOS != "windows" {
+		if err := limits.SetLimits(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to set limits: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	args := os.Args

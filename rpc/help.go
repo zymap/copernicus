@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/copernet/copernicus/conf"
 	"github.com/copernet/copernicus/rpc/btcjson"
 )
 
@@ -30,6 +31,7 @@ const (
 	NetworkCmd         = "Network"
 	RawTransactionsCmd = "RawTransactions"
 	UtilCmd            = "Util"
+	WalletCmd          = "Wallet"
 )
 
 var allMethodHelp = map[string]helpDescInfo{
@@ -52,6 +54,8 @@ var allMethodHelp = map[string]helpDescInfo{
 	"pruneblockchain":       {BlockChainCmd, pruneblockchainDesc},
 	"verifychain":           {BlockChainCmd, verifychainDesc},
 	"preciousblock":         {BlockChainCmd, preciousblockDesc},
+	"gettxoutproof":         {BlockChainCmd, gettxoutproofDesc},
+	"verifytxoutproof":      {BlockChainCmd, verifytxoutproofDesc},
 
 	"getnetworkhashps": {MiningCmd, getnetworkhashpsDesc},
 	"getmininginfo":    {MiningCmd, getmininginfoDesc},
@@ -80,12 +84,11 @@ var allMethodHelp = map[string]helpDescInfo{
 	"decodescript":         {RawTransactionsCmd, decodescriptDesc},
 	"sendrawtransaction":   {RawTransactionsCmd, sendrawtransactionDesc},
 	"signrawtransaction":   {RawTransactionsCmd, signrawtransactionDesc},
-	"gettxoutproof":        {RawTransactionsCmd, gettxoutproofDesc},
-	"verifytxoutproof":     {RawTransactionsCmd, verifytxoutproofDesc},
 
 	"getinfo": {ControlCmd, getinfoDesc},
 	"help":    {ControlCmd, helpDesc},
 	"stop":    {ControlCmd, stopDesc},
+	"uptime":  {ControlCmd, uptimeDesc},
 
 	"validateaddress": {UtilCmd, validateaddressDesc},
 	"createmultisig":  {UtilCmd, createmultisigDesc},
@@ -94,6 +97,16 @@ var allMethodHelp = map[string]helpDescInfo{
 	"setexcessiveblock":  {DebugCmd, setexcessiveblockDesc},
 	"waitforblockheight": {DebugCmd, waitforblockheightDesc},
 	"echo":               {DebugCmd, echoDesc},
+
+	"getnewaddress":      {WalletCmd, getnewaddressDesc},
+	"listunspent":        {WalletCmd, listunspentDesc},
+	"settxfee":           {WalletCmd, settxfeeDesc},
+	"sendtoaddress":      {WalletCmd, sendtoaddressDesc},
+	"getbalance":         {WalletCmd, getbalanceDesc},
+	"gettransaction":     {WalletCmd, gettransactionDesc},
+	"sendmany":           {WalletCmd, sendmanyDesc},
+	"fundrawtransaction": {WalletCmd, fundrawtransactionDesc},
+	"addmultisigaddress": {WalletCmd, addmultisigaddressDesc},
 }
 
 // rpcMethodHelp returns an RPC help string for the provided method.
@@ -130,6 +143,9 @@ func (c *helpCacher) rpcUsage(includeWebsockets bool) (string, error) {
 		if info.category == DebugCmd {
 			continue
 		}
+		if !conf.Cfg.Wallet.Enable && info.category == WalletCmd {
+			continue
+		}
 		if _, ok := usageTexts[info.category]; !ok {
 			category := make([]string, 0)
 			usageTexts[info.category] = &category
@@ -141,7 +157,7 @@ func (c *helpCacher) rpcUsage(includeWebsockets bool) (string, error) {
 		*usageTexts[info.category] = append(*usageTexts[info.category], usage)
 	}
 
-	categories := make([]string, 0)
+	categories := make([]string, 0, len(usageTexts))
 	for category := range usageTexts {
 		categories = append(categories, category)
 	}

@@ -183,10 +183,10 @@ type GetBlockTemplateResult struct {
 	Capabilities []string `json:"capabilities,omitempty"`
 	RejectReason string   `json:"reject-reason,omitempty"`
 
-	// BCH
-	Rules       []string       `json:"rules"`
-	VbAvailable map[string]int `json:"vbavailable"`
-	VbRequired  int            `json:"vbrequired"`
+	// at abc 0.18.4 version cancel the following fields
+	//Rules       []string       `json:"rules"`
+	//VbAvailable map[string]int `json:"vbavailable"`
+	//VbRequired  int            `json:"vbrequired"`
 }
 
 // GetMempoolEntryResult models the data returned from the getmempoolentry
@@ -539,9 +539,18 @@ type TxRawDecodeResult struct {
 // ValidateAddressChainResult models the data returned by the chain server
 // validateaddress command.
 type ValidateAddressChainResult struct {
-	IsValid      bool   `json:"isvalid"`
-	Address      string `json:"address,omitempty"`
-	ScriptPubKey string `json:"scriptPubKey,omitempty"`
+	IsValid       bool   `json:"isvalid"`
+	Address       string `json:"address,omitempty"`
+	ScriptPubKey  string `json:"scriptPubKey,omitempty"`
+	IsMine        bool   `json:"ismine,omitempty"`
+	IsWatchOnly   bool   `json:"iswatchonly,omitempty"`
+	IsScript      bool   `json:"isscript,omitempty"`
+	PubKey        string `json:"pubkey,omitempty"`
+	IsCompressed  bool   `json:"iscompressed,omitempty"`
+	Account       string `json:"account,omitempty"`
+	TimeStamp     uint32 `json:"timestamp,omitempty"`
+	HDKeyPath     string `json:"hdkeypath,omitempty"`
+	HDMasterKeyID string `json:"hdmasterkeyid,omitempty"`
 }
 
 type GetMempoolEntryRelativeInfoVerbose struct {
@@ -579,9 +588,7 @@ type SignRawTransactionResult struct {
 	Errors   []*SignRawTransactionError `json:"errors,omitempty"`
 }
 
-type GetChainTipsResult struct {
-	Tips []ChainTipsInfo
-}
+type GetChainTipsResult []ChainTipsInfo
 
 type ChainTipsInfo struct {
 	Height    int32  `json:"height"`
@@ -590,15 +597,25 @@ type ChainTipsInfo struct {
 	Status    string `json:"status"`
 }
 
-type ListBannedResult struct {
-	BannedINfo []BannedINfo
-}
+type ListBannedResult []BannedInfo
 
-type BannedINfo struct {
+type BannedInfo struct {
 	Address     string `json:"address"`
 	BannedUntil int64  `json:"banned_until"`
 	BanCreated  int64  `json:"ban_created"`
 	BanReason   string `json:"ban_reason"`
+}
+
+func (l ListBannedResult) Len() int {
+	return len(l)
+}
+
+func (l ListBannedResult) Swap(i, j int) {
+	l[i], l[j] = l[j], l[i]
+}
+
+func (l ListBannedResult) Less(i, j int) bool {
+	return l[i].BanCreated < l[j].BanCreated
 }
 
 // VersionResult models objects included in the version response.
@@ -614,4 +631,47 @@ type VersionResult struct {
 type WaitForBlockHeightResult struct {
 	Hash   string `json:"hash"`
 	Height int32  `json:"height"`
+}
+
+type ListUnspentResult struct {
+	TxID          string  `json:"txid"`
+	Vout          uint32  `json:"vout"`
+	Address       string  `json:"address"`
+	Account       string  `json:"account,omitempty"`
+	ScriptPubKey  string  `json:"scriptPubKey"`
+	Amount        float64 `json:"amount"`
+	Confirmations int32   `json:"confirmations"`
+	RedeemScript  string  `json:"redeemScript,omitempty"`
+	Spendable     bool    `json:"spendable"`
+	Solvable      bool    `json:"solvable"`
+	Safe          bool    `json:"safe"`
+}
+
+type GetTransactionDetailsResult struct {
+	Account           string   `json:"account"`
+	Address           string   `json:"address,omitempty"`
+	Amount            float64  `json:"amount"`
+	Category          string   `json:"category"`
+	InvolvesWatchOnly bool     `json:"involveswatchonly,omitempty"`
+	Fee               *float64 `json:"fee,omitempty"`
+	Vout              uint32   `json:"vout"`
+}
+
+type GetTransactionResult struct {
+	Amount          float64                       `json:"amount"`
+	Fee             float64                       `json:"fee,omitempty"`
+	Confirmations   int32                         `json:"confirmations"`
+	BlockHash       string                        `json:"blockhash"`
+	BlockTime       uint32                        `json:"blocktime"`
+	TxID            string                        `json:"txid"`
+	WalletConflicts []string                      `json:"walletconflicts"`
+	TimeReceived    int64                         `json:"timereceived"`
+	Details         []GetTransactionDetailsResult `json:"details"`
+	Hex             string                        `json:"hex"`
+}
+
+type FundRawTransactionResult struct {
+	Hex       string  `json:"hex"`
+	Changepos int     `json:"changepos"`
+	Fee       float64 `json:"fee"`
 }

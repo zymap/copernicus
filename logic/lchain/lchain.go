@@ -60,16 +60,13 @@ func ConnectBlock(pblock *block.Block, pindex *blockindex.BlockIndex, view *utxo
 	log.Debug("bestHash = %s, hashPrevBloc = %s", bestHash, hashPrevBlock)
 	if !hashPrevBlock.IsEqual(&bestHash) {
 		log.Debug("will panic in ConnectBlock()")
-		panic("error: hashPrevBlock not equal view.GetBestBlock()")
+		panic(fmt.Sprintf("error: hashPrevBlock:%s not equal view.GetBestBlock():%s", hashPrevBlock, bestHash))
 	}
 
 	// Special case for the genesis lblock, skipping connection of its
 	// transactions (its coinbase is unspendable)
 	blockHash := pblock.GetHash()
 	if blockHash.IsEqual(params.GenesisHash) {
-		if !fJustCheck {
-			//view.SetBestBlock(*pindex.GetBlockHash())
-		}
 		return nil
 	}
 
@@ -146,23 +143,35 @@ func ConnectBlock(pblock *block.Block, pindex *blockindex.BlockIndex, view *utxo
 	bip34Enable := pindexBIP34height != nil && pindexBIP34height.GetBlockHash().IsEqual(&params.BIP34Hash)
 	bip30Enable = bip30Enable && !bip34Enable
 
+	lockTimeFlags := 0
+	if pindex.Height >= gChain.GetParams().CSVHeight {
+		lockTimeFlags |= consensus.LocktimeVerifySequence
+	}
+
 	flags := lblock.GetBlockScriptFlags(pindex.Prev)
-	blockSubSidy := lblock.GetBlockSubsidy(pindex.Height, params)
+	log.Debug("Connect Block: %s, height: %d, flags: %d", pindex.GetBlockHash().String(), pindex.Height, flags)
+	blockSubSidy := model.GetBlockSubsidy(pindex.Height, params)
 	time2 := time.Now()
 	gPersist.GlobalTimeForks += time2.Sub(time1)
 	log.Print("bench", "debug", " - Fork checks: current %v [total %v]",
 		time2.Sub(time1), gPersist.GlobalTimeForks)
 
-	var coinsMap, blockUndo, err = ltx.ApplyBlockTransactions(pblock.Txs, bip30Enable, flags,
-		fScriptChecks, blockSubSidy, pindex.Height, consensus.GetMaxBlockSigOpsCount(uint64(pblock.EncodeSize())))
+	maxSigOps, errSig := consensus.GetMaxBlockSigOpsCount(uint64(pblock.EncodeSize()))
+	if errSig != nil {
+		return errSig
+	}
+
+	coinsMap, blockUndo, err := ltx.ApplyBlockTransactions(pblock.Txs, bip30Enable, flags,
+		fScriptChecks, blockSubSidy, pindex.Height, maxSigOps, uint32(lockTimeFlags), pindex)
 	if err != nil {
 		return err
 	}
+
+	undoPos := pindex.GetUndoPos()
 	// Write undo information to disk
-	UndoPos := pindex.GetUndoPos()
 	if !fJustCheck {
-		if UndoPos.IsNull() || !pindex.IsValid(blockindex.BlockValidScripts) {
-			if UndoPos.IsNull() {
+		if undoPos.IsNull() || !pindex.IsValid(blockindex.BlockValidScripts) {
+			if undoPos.IsNull() {
 				pos := block.NewDiskBlockPos(pindex.File, 0)
 				//blockUndo size + hash size + 4bytes len
 				if err := disk.FindUndoPos(pindex.File, pos, blockUndo.SerializeSize()+36); err != nil {
@@ -179,15 +188,15 @@ func ConnectBlock(pblock *block.Block, pindex *blockindex.BlockIndex, view *utxo
 			pindex.RaiseValidity(blockindex.BlockValidScripts)
 			gPersist.AddDirtyBlockIndex(pindex)
 		}
-
 		// add this block to the view's block chain
 		*view = *coinsMap
 	}
 
-	//if (pindex.IsReplayProtectionEnabled(params) &&
-	//	!pindex.Prev.IsReplayProtectionEnabled(params)) {
-	//	lmempool.clear();
-	//}
+	// If we just activated the replay protection with that block, it means
+	// transaction in the mempool are now invalid. As a result, we need to clear the mempool.
+	if pindex.IsReplayProtectionJustEnabled() {
+		mempool.InitMempool()
+	}
 
 	log.Debug("Connect block heigh:%d, hash:%s", pindex.Height, blockHash)
 	return nil
@@ -196,10 +205,14 @@ func ConnectBlock(pblock *block.Block, pindex *blockindex.BlockIndex, view *utxo
 //InvalidBlockFound the found block is invalid
 func InvalidBlockFound(pindex *blockindex.BlockIndex) {
 	pindex.AddStatus(blockindex.BlockFailed)
-	gChain := chain.GetInstance()
-	gChain.RemoveFromBranch(pindex)
-	gPersist := persist.GetInstance()
-	gPersist.AddDirtyBlockIndex(pindex)
+	mchain.GetInstance().RemoveFromBranch(pindex)
+	persist.GetInstance().AddDirtyBlockIndex(pindex)
+}
+
+func InvalidBlockParentFound(pindex *blockindex.BlockIndex) {
+	pindex.AddStatus(blockindex.BlockFailedParent)
+	mchain.GetInstance().RemoveFromBranch(pindex)
+	persist.GetInstance().AddDirtyBlockIndex(pindex)
 }
 
 type connectTrace map[*blockindex.BlockIndex]*block.Block
@@ -228,7 +241,6 @@ func ConnectTip(pIndexNew *blockindex.BlockIndex,
 		}
 		connTrace[pIndexNew] = blockNew
 		block = blockNew
-
 	} else {
 		connTrace[pIndexNew] = block
 	}
@@ -247,11 +259,11 @@ func ConnectTip(pIndexNew *blockindex.BlockIndex,
 		log.Error("ConnectTip(): ConnectBlock %s failed, err:%v", indexHash, err)
 		return err
 	}
-
 	nTime3 := util.GetMicrosTime()
 	gPersist.GlobalTimeConnectTotal += nTime3 - nTime2
 	log.Debug("Connect total: %.2fms [%.2fs]\n",
 		float64(nTime3-nTime2)*0.001, float64(gPersist.GlobalTimeConnectTotal)*0.000001)
+
 	//flushed := view.Flush(indexHash)
 	err = utxo.GetUtxoCacheInstance().UpdateCoins(view, &indexHash)
 	if err != nil {
@@ -261,6 +273,7 @@ func ConnectTip(pIndexNew *blockindex.BlockIndex,
 	gPersist.GlobalTimeFlush += nTime4 - nTime3
 	log.Print("bench", "debug", " - Flush: %.2fms [%.2fs]\n",
 		float64(nTime4-nTime3)*0.001, float64(gPersist.GlobalTimeFlush)*0.000001)
+
 	// Write the chain state to disk, if necessary.
 	if err := disk.FlushStateToDisk(disk.FlushStateAlways, 0); err != nil {
 		return err
@@ -281,11 +294,11 @@ func ConnectTip(pIndexNew *blockindex.BlockIndex,
 		taskControl.StartUtxoTask()
 		taskControl.PushUtxoTask(utxoTaskArg{iter, &stat})
 	}
-
 	nTime5 := util.GetMicrosTime()
 	gPersist.GlobalTimeChainState += nTime5 - nTime4
 	log.Print("bench", "debug", " - Writing chainstate: %.2fms [%.2fs]\n",
 		float64(nTime5-nTime4)*0.001, float64(gPersist.GlobalTimeChainState)*0.000001)
+
 	// Remove conflicting transactions from the mempool.;
 	mempool.GetInstance().RemoveTxSelf(blockConnecting.Txs)
 	// Update chainActive & related variables.
@@ -310,6 +323,7 @@ func DisconnectTip(fBare bool) error {
 	if tip == nil {
 		panic("the chain tip element should not equal nil")
 	}
+	log.Warn("DisconnectTip block(%s)", tip.GetBlockHash())
 	// Read block from disk.
 	blk, ret := disk.ReadBlockFromDisk(tip, gChain.GetParams())
 	if !ret {
@@ -342,6 +356,20 @@ func DisconnectTip(fBare bool) error {
 		return err
 	}
 
+	// If this block was deactivating the replay protection, then we need to
+	// remove transactions that are replay protected from the mempool. There is
+	// no easy way to do this so we'll just discard the whole mempool and then
+	// add the transaction of the block we just disconnected back.
+	//
+	// If we are deactivating Magnetic anomaly, we want to make sure we do not
+	// have transactions in the mempool that use newly introduced opcodes. As a
+	// result, we also cleanup the mempool.
+	if tip.IsReplayProtectionJustEnabled() || tip.IsMagneticAnomalyJustEnabled() {
+		mempool.InitMempool()
+	}
+
+	UpdateTip(tip.Prev)
+
 	if !fBare {
 		// Resurrect mempool transactions from the disconnected block.
 		for _, tx := range blk.Txs {
@@ -355,39 +383,8 @@ func DisconnectTip(fBare bool) error {
 				}
 			}
 		}
-		// AcceptToMemoryPool/addUnchecked all assume that new memPool entries
-		// have no in-memPool children, which is generally not true when adding
-		// previously-confirmed transactions back to the memPool.
-		// UpdateTransactionsFromBlock finds descendants of any transactions in
-		// this block that were added back and cleans up the memPool state.
-		//mempool.Gpool.UpdateTransactionsFromBlock(vHashUpdate)
 	}
-	// If this block was deactivating the replay protection, then we need to
-	// remove transactions that are replay protected from the mempool. There is
-	// no easy way to do this so we'll just discard the whole mempool and then
-	// add the transaction of the block we just disconnected back.
-	//
-	// Samewise, if this block enabled the monolith opcodes, then we need to
-	// clear the mempool of any transaction using them.
-	//if ((IsReplayProtectionEnabled(config, pindexDelete) &&
-	//	!IsReplayProtectionEnabled(config, pindexDelete->pprev)) ||
-	//	(IsMonolithEnabled(config, pindexDelete) &&
-	//		!IsMonolithEnabled(config, pindexDelete->pprev))) {
-	//	lmempool.clear();
-	//	// While not strictly necessary, clearing the disconnect pool is also
-	//	// beneficial so we don't try to reuse its content at the end of the
-	//	// reorg, which we know will fail.
-	//	if (disconnectpool) {
-	//		disconnectpool->clear();
-	//	}
-	//}
-	// Update chainActive and related variables.
-	UpdateTip(tip.Prev)
-	// Let wallets know transactions went from 1-confirmed to
-	// 0-confirmed or conflicted:
-
 	gChain.SendNotification(chain.NTBlockDisconnected, blk)
-
 	return nil
 }
 
@@ -396,56 +393,7 @@ func UpdateTip(pindexNew *blockindex.BlockIndex) {
 	gChain := chain.GetInstance()
 	gChain.SetTip(pindexNew)
 	param := gChain.GetParams()
-	//	TODO !!! notify mempool update tx
 	warningMessages := make([]string, 0)
-	// if !lundo.IsInitialBlockDownload() {
-	// todo check block version and warn it
-	// nUpgraded := 0
-	// pindex := gChain.Tip()
-	// for bit := 0; bit < versionbits.VersionBitsNumBits; bit++ {
-	// 	checker := versionbits.NewWarningBitsConChecker(bit)
-	// 	state := versionbits.GetStateFor(checker, pindex, param, GWarningCache[bit])
-	// 	if state == versionbits.ThresholdActive || state == versionbits.ThresholdLockedIn {
-	// 		if state == versionbits.ThresholdActive {
-	// 			strWaring := fmt.Sprintf("Warning: unknown new rules activated (versionbit %d)", bit)
-	// 			msg.SetMiscWarning(strWaring)
-	// 			if !gWarned {
-	// 				AlertNotify(strWaring)
-	// 				gWarned = true
-	// 			}
-	// 		} else {
-	// 			warningMessages = append(warningMessages,
-	// 				fmt.Sprintf("unknown new rules are about to activate (versionbit %d)", bit))
-	// 		}
-	// 	}
-	// }
-	// // Check the version of the last 100 blocks to see if we need to
-	// // upgrade:
-	// for i := 0; i < 100 && index != nil; i++ {
-	// 	nExpectedVersion := ComputeBlockVersion(index.Prev, param, VBCache)
-	// 	if index.Header.Version > VersionBitsLastOldBlockVersion &&
-	// 		(int(index.Header.Version)&(^nExpectedVersion) != 0) {
-	// 		nUpgraded++
-	// 		index = index.Prev
-	// 	}
-	// }
-	// if nUpgraded > 0 {
-	// 	warningMessages = append(warningMessages,
-	// 		fmt.Sprintf("%d of last 100 blocks have unexpected version", nUpgraded))
-	// }
-	// if nUpgraded > 100/2 {
-	// 	strWarning := fmt.Sprintf("Warning: Unknown block versions being mined!" +
-	// 		" It's possible unknown rules are in effect")
-	// 	// notify GetWarnings(), called by Qt and the JSON-RPC code to warn
-	// 	// the user:
-	// 	msg.SetMiscWarning(strWarning)
-	// 	if !gWarned {
-	// 		AlertNotify(strWarning)
-	//
-	// 		gWarned = true
-	// 	}
-	// }
-	// }
 	txdata := param.TxData()
 	tip := chain.GetInstance().Tip()
 	utxoTip := utxo.GetUtxoCacheInstance()
@@ -480,7 +428,6 @@ func GuessVerificationProgress(data *model.ChainTxData, index *blockindex.BlockI
 }
 
 func DisconnectBlock(pblock *block.Block, pindex *blockindex.BlockIndex, view *utxo.CoinsMap) undo.DisconnectResult {
-
 	hashA := pindex.GetBlockHash()
 	hashB, _ := utxo.GetUtxoCacheInstance().GetBestBlock()
 	if !bytes.Equal(hashA[:], hashB[:]) {
@@ -497,7 +444,7 @@ func DisconnectBlock(pblock *block.Block, pindex *blockindex.BlockIndex, view *u
 		return undo.DisconnectFailed
 	}
 
-	return lundo.ApplyBlockUndo(blockUndo, pblock, view)
+	return lundo.ApplyBlockUndo(blockUndo, pblock, view, pindex.Height)
 }
 
 func InitGenesisChain() error {

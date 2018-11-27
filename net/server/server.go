@@ -9,10 +9,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/copernet/copernicus/persist"
 	"math"
 	"net"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -25,8 +29,8 @@ import (
 	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/logic/lblock"
 	"github.com/copernet/copernicus/logic/lchain"
+	"github.com/copernet/copernicus/logic/lmempool"
 	"github.com/copernet/copernicus/model"
-	"github.com/copernet/copernicus/model/bitcointime"
 	"github.com/copernet/copernicus/model/block"
 	"github.com/copernet/copernicus/model/blockindex"
 	"github.com/copernet/copernicus/model/chain"
@@ -47,7 +51,7 @@ import (
 const (
 	// defaultServices describes the default services that are supported by
 	// the server.
-	defaultServices = wire.SFNodeNetwork // | wire.SFNodeBloom | wire.SFNodeWitness
+	defaultServices = wire.SFNodeNetwork | wire.SFNodeCash
 
 	// defaultRequiredServices describes the default services that are
 	// required to be supported by outbound peers.
@@ -63,7 +67,10 @@ const (
 
 	// max blocks to announce during inventory relay
 	// increase the num in case cut out inv
-	maxBlocksToAnnounce = 10
+	maxBlocksToAnnounce = 20
+
+	BanReasonNodeMisbehaving int = 1
+	BanReasonManuallyAdded   int = 2
 )
 
 var (
@@ -146,6 +153,11 @@ type relayMsg struct {
 	data    interface{}
 }
 
+type minedBlockMsg struct {
+	block *block.Block
+	done  chan error
+}
+
 // updatePeerHeightsMsg is a message sent from the blockmanager to the server
 // after a new block has been accepted. The purpose of the message is to update
 // the heights of peers that were known to announce the block before we
@@ -158,15 +170,44 @@ type updatePeerHeightsMsg struct {
 	originPeer *peer.Peer
 }
 
+type BannedInfo struct {
+	Address    string
+	BanUntil   int64
+	CreateTime int64
+	Reason     int
+}
+
 // peerState maintains state of inbound, persistent, outbound peers as well
 // as banned peers and outbound groups.
 type peerState struct {
 	inboundPeers    map[int32]*serverPeer
 	outboundPeers   map[int32]*serverPeer
 	persistentPeers map[int32]*serverPeer
-	banned          map[string]time.Time
+	bannedAddr      map[string]*BannedInfo
+	bannedIPNet     map[string]*BannedInfo
 	outboundGroups  map[string]int
 }
+
+type banScoreMsg struct {
+	peerAddr   string
+	persistent uint32
+	transient  uint32
+	reason     string
+}
+
+type banAddressMsg struct {
+	address      string
+	startTime    int64
+	endTime      int64
+	reason       int
+	hasBannedChn chan bool
+}
+
+type getBannedInfoMsg struct {
+	bannedInfoChn chan []*BannedInfo
+}
+
+type clearBannedMsg struct{}
 
 // Count returns the count of all known peers.
 func (ps *peerState) Count() int {
@@ -213,15 +254,24 @@ type Server struct {
 	newPeers             chan *serverPeer
 	donePeers            chan *serverPeer
 	banPeers             chan *serverPeer
+	banAddress           chan *banAddressMsg
+	unbanAddress         chan *banAddressMsg
+	getBannedInfo        chan *getBannedInfoMsg
+	clearBanned          chan *clearBannedMsg
 	query                chan interface{}
 	relayInv             chan relayMsg
+	minedBlock           chan minedBlockMsg
 	broadcast            chan broadcastMsg
 	peerHeightsUpdate    chan updatePeerHeightsMsg
 	wg                   sync.WaitGroup
 	quit                 chan struct{}
 	nat                  upnp.NAT
-	timeSource           *bitcointime.MedianTime
+	timeSource           *util.MedianTime
 	services             wire.ServiceFlag
+	connectPeerChn       chan *serverPeer
+	banScoreChn          chan *banScoreMsg
+	connectedPeers       map[string]*serverPeer
+	banPeerFile          string
 
 	// The following fields are used for optional indexes.  They will be nil
 	// if the associated index is not enabled.  These fields are set during
@@ -246,7 +296,6 @@ type serverPeer struct {
 	relayMtx       sync.Mutex
 	disableRelayTx bool
 	sentAddrs      bool
-	isWhitelisted  bool
 	filter         *bloom.Filter
 	knownAddresses map[string]struct{}
 	banScore       connmgr.DynamicBanScore
@@ -268,6 +317,12 @@ func newServerPeer(s *Server, isPersistent bool) *serverPeer {
 		txProcessed:    make(chan struct{}, 1),
 		blockProcessed: make(chan struct{}, 1),
 	}
+}
+
+// newestBlock returns the current best block hash and height using the format
+// required by the configuration for the peer package.
+func (sp *serverPeer) IsWhitelisted() bool {
+	return sp.Peer != nil && sp.Peer.IsWhitelisted()
 }
 
 // newestBlock returns the current best block hash and height using the format
@@ -341,7 +396,7 @@ func (sp *serverPeer) addBanScore(persistent, transient uint32, reason string) {
 	if conf.Cfg.P2PNet.DisableBanning {
 		return
 	}
-	if sp.isWhitelisted {
+	if sp.IsWhitelisted() {
 		log.Debug("Misbehaving whitelisted peer %s: %s", sp, reason)
 		return
 	}
@@ -361,11 +416,10 @@ func (sp *serverPeer) addBanScore(persistent, transient uint32, reason string) {
 	if score > warnThreshold {
 		log.Warn("Misbehaving peer %s: %s -- ban score increased to %d",
 			sp, reason, score)
-		if score > conf.Cfg.P2PNet.BanThreshold {
+		if score >= conf.Cfg.P2PNet.BanThreshold {
 			log.Warn("Misbehaving peer %s -- banning and disconnecting",
 				sp)
 			sp.server.BanPeer(sp)
-			sp.Disconnect()
 		}
 	}
 }
@@ -420,7 +474,7 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
 func (sp *serverPeer) OnMemPool(_ *peer.Peer, msg *wire.MsgMemPool) {
 	// Only allow mempool requests if the server has bloom filtering
 	// enabled.
-	if sp.server.services&wire.SFNodeBloom != wire.SFNodeBloom && !sp.isWhitelisted {
+	if sp.server.services&wire.SFNodeBloom != wire.SFNodeBloom && !sp.IsWhitelisted() {
 		log.Debug("peer %v sent mempool request with bloom "+
 			"filtering disabled -- disconnecting", sp)
 		sp.Disconnect()
@@ -690,7 +744,7 @@ func (sp *serverPeer) OnGetBlocks(_ *peer.Peer, msg *wire.MsgGetBlocks) {
 // message.
 func (sp *serverPeer) OnGetHeaders(_ *peer.Peer, msg *wire.MsgGetHeaders) {
 	// Ignore getheaders requests if not in sync.
-	if !sp.server.syncManager.IsCurrent() {
+	if !sp.IsWhitelisted() && !sp.server.syncManager.IsCurrent() {
 		log.Debug("syncmanager: chain is not update-to-date, ignore msgGetHeaders")
 		return
 	}
@@ -941,7 +995,7 @@ func randomUint16Number(max uint16) uint16 {
 	for {
 		binary.Read(rand.Reader, binary.LittleEndian, &randomNumber)
 		if randomNumber < limitRange {
-			return (randomNumber % max)
+			return randomNumber % max
 		}
 	}
 }
@@ -1040,26 +1094,7 @@ func (s *Server) pushTxMsg(sp *serverPeer, hash *util.Hash, doneChan chan<- stru
 func (s *Server) pushBlockMsg(sp *serverPeer, hash *util.Hash, doneChan chan<- struct{},
 	waitChan <-chan struct{}, encoding wire.MessageEncoding) error {
 
-	activeChain := chain.GetInstance()
-	var blkIndex *blockindex.BlockIndex
-	send := false
-	if blkIndex = activeChain.FindBlockIndex(*hash); blkIndex != nil {
-
-		// TODO: we may add it back when we support header-first mode
-		// if blkIndex.ChainTxCount > 0 && !blkIndex.IsValid(blockindex.BlockValidScripts) &&
-		// 	blkIndex.IsValid(blockindex.BlockValidTree) {
-		// }
-
-		// Check the block whether in main chain.
-		if activeChain.Contains(blkIndex) {
-			//nOneMonth := 30 * 24 * 60 * 60
-			//todo !!! add time process, exclude too older block.
-			if blkIndex.IsValid(blockindex.BlockValidScripts) {
-				send = true
-			}
-		}
-	}
-
+	blkIndex, send := findBlockIndex(hash)
 	if send && blkIndex.HasData() {
 		// Fetch the raw block bytes from the database.
 		bl, err := lblock.GetBlockByIndex(blkIndex, s.chainParams)
@@ -1100,71 +1135,99 @@ func (s *Server) pushBlockMsg(sp *serverPeer, hash *util.Hash, doneChan chan<- s
 			sp.QueueMessage(invMsg, doneChan)
 			sp.continueHash = nil
 		}
+	} else {
+		log.Error("data for block(%s) is not ready: send(%v) blkIndex(%v)", hash, send, blkIndex)
+		doneChan <- struct{}{}
+		return fmt.Errorf("data for block(%s) is not ready", hash)
 	}
 
 	return nil
+}
+
+func findBlockIndex(hash *util.Hash) (blkIndex *blockindex.BlockIndex, send bool) {
+	persist.CsMain.Lock() //to protect chain.indexMap
+	defer persist.CsMain.Unlock()
+
+	activeChain := chain.GetInstance()
+	if blkIndex = activeChain.FindBlockIndex(*hash); blkIndex != nil {
+
+		// TODO: we may add it back when we support header-first mode
+		// if blkIndex.ChainTxCount > 0 && !blkIndex.IsValid(blockindex.BlockValidScripts) &&
+		// 	blkIndex.IsValid(blockindex.BlockValidTree) {
+		// }
+
+		// Check the block whether in main chain.
+		if activeChain.Contains(blkIndex) {
+			//nOneMonth := 30 * 24 * 60 * 60
+			//todo !!! add time process, exclude too older block.
+			if blkIndex.IsValid(blockindex.BlockValidScripts) {
+				send = true
+			}
+		}
+	}
+	return
 }
 
 // pushMerkleBlockMsg sends a merkleblock message for the provided block hash to
 // the connected peer.  Since a merkle block requires the peer to have a filter
 // loaded, this call will simply be ignored if there is no filter loaded.  An
 // error is returned if the block hash is not known.
-func (s *Server) pushMerkleBlockMsg(sp *serverPeer, hash *util.Hash,
-	doneChan chan<- struct{}, waitChan <-chan struct{}, encoding wire.MessageEncoding) error {
+//func (s *Server) pushMerkleBlockMsg(sp *serverPeer, hash *util.Hash,
+//	doneChan chan<- struct{}, waitChan <-chan struct{}, encoding wire.MessageEncoding) error {
 
-	// Do not send a response if the peer doesn't have a filter loaded.
-	//if !sp.filter.IsLoaded() {
-	if doneChan != nil {
-		doneChan <- struct{}{}
-	}
-	return nil
-	//}
+// Do not send a response if the peer doesn't have a filter loaded.
+//if !sp.filter.IsLoaded() {
+//if doneChan != nil {
+//	doneChan <- struct{}{}
+//}
+//return nil
+//}
 
-	// // Fetch the raw block bytes from the database.
-	// blk, err := lblock.GetBlock(hash)
-	// if err != nil {
-	// 	log.Trace("Unable to fetch requested block hash %v: %v",
-	// 		hash, err)
+// // Fetch the raw block bytes from the database.
+// blk, err := lblock.GetBlock(hash)
+// if err != nil {
+// 	log.Trace("Unable to fetch requested block hash %v: %v",
+// 		hash, err)
 
-	// 	if doneChan != nil {
-	// 		doneChan <- struct{}{}
-	// 	}
-	// 	return err
-	// }
+// 	if doneChan != nil {
+// 		doneChan <- struct{}{}
+// 	}
+// 	return err
+// }
 
-	// // Generate a merkle block by filtering the requested block according
-	// // to the filter for the peer.
-	// merkle, matchedTxIndices := bloom.NewMerkleBlock(blk, sp.filter)
+// // Generate a merkle block by filtering the requested block according
+// // to the filter for the peer.
+// merkle, matchedTxIndices := bloom.NewMerkleBlock(blk, sp.filter)
 
-	// // Once we have fetched data wait for any previous operation to finish.
-	// if waitChan != nil {
-	// 	<-waitChan
-	// }
+// // Once we have fetched data wait for any previous operation to finish.
+// if waitChan != nil {
+// 	<-waitChan
+// }
 
-	// // Send the merkleblock.  Only send the done channel with this message
-	// // if no transactions will be sent afterwards.
-	// var dc chan<- struct{}
-	// if len(matchedTxIndices) == 0 {
-	// 	dc = doneChan
-	// }
-	// sp.QueueMessage(merkle, dc)
+// // Send the merkleblock.  Only send the done channel with this message
+// // if no transactions will be sent afterwards.
+// var dc chan<- struct{}
+// if len(matchedTxIndices) == 0 {
+// 	dc = doneChan
+// }
+// sp.QueueMessage(merkle, dc)
 
-	// // Finally, send any matched transactions.
-	// blkTransactions := blk.Txs
-	// for i, txIndex := range matchedTxIndices {
-	// 	// Only send the done channel on the final transaction.
-	// 	var dc chan<- struct{}
-	// 	if i == len(matchedTxIndices)-1 {
-	// 		dc = doneChan
-	// 	}
-	// 	if txIndex < uint32(len(blkTransactions)) {
-	// 		sp.QueueMessageWithEncoding(blkTransactions[txIndex], dc,
-	// 			encoding)
-	// 	}
-	// }
+// // Finally, send any matched transactions.
+// blkTransactions := blk.Txs
+// for i, txIndex := range matchedTxIndices {
+// 	// Only send the done channel on the final transaction.
+// 	var dc chan<- struct{}
+// 	if i == len(matchedTxIndices)-1 {
+// 		dc = doneChan
+// 	}
+// 	if txIndex < uint32(len(blkTransactions)) {
+// 		sp.QueueMessageWithEncoding(blkTransactions[txIndex], dc,
+// 			encoding)
+// 	}
+// }
 
-	// return nil
-}
+// return nil
+//}
 
 // handleUpdatePeerHeight updates the heights of all peers who were known to
 // announce a block we recently accepted.
@@ -1209,22 +1272,42 @@ func (s *Server) handleAddPeerMsg(state *peerState, sp *serverPeer) bool {
 	}
 
 	// Disconnect banned peers.
+	now := util.GetTime()
 	host, _, err := net.SplitHostPort(sp.Addr())
 	if err != nil {
 		log.Debug("can't split hostport %v", err)
 		sp.Disconnect()
 		return false
 	}
-	if banEnd, ok := state.banned[host]; ok {
-		if time.Now().Before(banEnd) {
+	if banEnd, ok := state.bannedAddr[host]; ok {
+		if now < banEnd.BanUntil {
 			log.Debug("Peer %s is banned for another %v - disconnecting",
-				host, time.Until(banEnd))
+				host, banEnd.BanUntil-now)
 			sp.Disconnect()
 			return false
 		}
 
 		log.Info("Peer %s is no longer banned", host)
-		delete(state.banned, host)
+		delete(state.bannedAddr, host)
+	}
+	ip := net.ParseIP(host)
+	if ip != nil {
+		for netCIDR, banEnd := range state.bannedIPNet {
+			_, ipNet, err := net.ParseCIDR(netCIDR)
+			if err != nil || !ipNet.Contains(ip) {
+				continue
+			}
+			if now < banEnd.BanUntil {
+				log.Debug("IP Net %s that contains host %s is banned for another %v - disconnecting",
+					ipNet.String(), host, banEnd.BanUntil-now)
+				sp.Disconnect()
+				return false
+			}
+
+			log.Info("ipNet %s is no longer banned", ipNet.String())
+			delete(state.bannedIPNet, netCIDR)
+			break
+		}
 	}
 
 	// TODO: Check for max peers from a single IP.
@@ -1300,9 +1383,188 @@ func (s *Server) handleBanPeerMsg(state *peerState, sp *serverPeer) {
 		log.Debug("can't split ban peer %s %v", sp.Addr(), err)
 		return
 	}
-	log.Info("Banned peer %s (inBlund:%v) for %v", host, sp.Inbound(),
+	log.Info("Banned peer %s (inBound:%v) for %v", host, sp.Inbound(),
 		conf.Cfg.P2PNet.BanDuration)
-	state.banned[host] = time.Now().Add(conf.Cfg.P2PNet.BanDuration)
+	now := util.GetTime()
+	state.bannedAddr[host] = &BannedInfo{
+		Address:    host,
+		BanUntil:   now + int64(conf.Cfg.P2PNet.BanDuration),
+		CreateTime: now,
+		Reason:     BanReasonNodeMisbehaving,
+	}
+
+	sp.Disconnect()
+	delete(s.connectedPeers, sp.Addr())
+	s.saveBannedInfo(state)
+}
+
+func (s *Server) handleBanAddressMsg(state *peerState, bmsg *banAddressMsg) {
+	if strings.Contains(bmsg.address, "/") {
+		_, ok := state.bannedIPNet[bmsg.address]
+		if ok {
+			bmsg.hasBannedChn <- true
+			return
+		}
+		bmsg.hasBannedChn <- false
+
+		_, bannedNet, err := net.ParseCIDR(bmsg.address)
+		if err != nil {
+			log.Debug("can't parse ban ip net %s. error:%s", bmsg.address, err.Error())
+			return
+		}
+		log.Info("Ban ip net %s until %d", bmsg.address, bmsg.endTime)
+		state.bannedIPNet[bmsg.address] = &BannedInfo{
+			Address:    bmsg.address,
+			BanUntil:   bmsg.endTime,
+			CreateTime: bmsg.startTime,
+			Reason:     bmsg.reason,
+		}
+
+		state.forAllPeers(func(sp *serverPeer) {
+			ip := net.ParseIP(sp.Addr())
+			if ip != nil && bannedNet.Contains(ip) {
+				log.Info("Ban peer %s (is inbound:%v) until %d", sp.Addr(), sp.Inbound(), bmsg.endTime)
+				sp.Disconnect()
+				delete(s.connectedPeers, sp.Addr())
+			}
+		})
+
+	} else {
+		_, ok := state.bannedAddr[bmsg.address]
+		if ok {
+			bmsg.hasBannedChn <- true
+			return
+		}
+		ip := net.ParseIP(bmsg.address)
+		if ip == nil {
+			log.Error("Ban address %s is invalid", bmsg.address)
+			return
+		}
+		for bannedCIDR := range state.bannedIPNet {
+			_, bannedNet, err := net.ParseCIDR(bannedCIDR)
+			if err != nil {
+				continue
+			}
+			if bannedNet.Contains(ip) {
+				bmsg.hasBannedChn <- true
+				return
+			}
+		}
+		bmsg.hasBannedChn <- false
+
+		log.Info("Ban peer %s until %d", bmsg.address, bmsg.endTime)
+		state.bannedAddr[bmsg.address] = &BannedInfo{
+			Address:    bmsg.address,
+			BanUntil:   bmsg.endTime,
+			CreateTime: bmsg.startTime,
+			Reason:     bmsg.reason,
+		}
+
+		state.forAllPeers(func(sp *serverPeer) {
+			host, _, err := net.SplitHostPort(sp.Addr())
+			if err == nil && host == bmsg.address {
+				log.Info("Ban peer %s (is inbound:%v) until %d", sp.Addr(), sp.Inbound(), bmsg.endTime)
+				sp.Disconnect()
+				delete(s.connectedPeers, sp.Addr())
+			}
+		})
+	}
+	s.saveBannedInfo(state)
+}
+
+func (s *Server) handleUnbanAddressMsg(state *peerState, bmsg *banAddressMsg) {
+	if strings.Contains(bmsg.address, "/") {
+		_, ok := state.bannedIPNet[bmsg.address]
+		if !ok {
+			bmsg.hasBannedChn <- false
+			return
+		}
+		bmsg.hasBannedChn <- true
+
+		log.Info("Unban ip net %s", bmsg.address)
+		delete(state.bannedIPNet, bmsg.address)
+
+	} else {
+		_, ok := state.bannedAddr[bmsg.address]
+		if !ok {
+			bmsg.hasBannedChn <- false
+			return
+		}
+		bmsg.hasBannedChn <- true
+
+		log.Info("Unban peer %s", bmsg.address)
+		delete(state.bannedAddr, bmsg.address)
+	}
+	s.saveBannedInfo(state)
+}
+func (s *Server) getBannedList(state *peerState) []*BannedInfo {
+	bannedInfoList := make([]*BannedInfo, 0)
+	now := util.GetTime()
+	for _, info := range state.bannedAddr {
+		if now < info.BanUntil {
+			bannedInfoList = append(bannedInfoList, info)
+		}
+	}
+	for _, info := range state.bannedIPNet {
+		if now < info.BanUntil {
+			bannedInfoList = append(bannedInfoList, info)
+		}
+	}
+	return bannedInfoList
+}
+
+func (s *Server) handleGetBannedInfoMsg(state *peerState, msg *getBannedInfoMsg) {
+	bannedList := s.getBannedList(state)
+	msg.bannedInfoChn <- bannedList
+}
+
+func (s *Server) handleClearBannedMsg(state *peerState) {
+	log.Info("clear all banned info")
+	state.bannedAddr = make(map[string]*BannedInfo)
+	state.bannedIPNet = make(map[string]*BannedInfo)
+	s.saveBannedInfo(state)
+}
+
+func (s *Server) saveBannedInfo(state *peerState) {
+	bannedList := s.getBannedList(state)
+
+	w, err := os.Create(s.banPeerFile)
+	if err != nil {
+		log.Error("Error opening file %s: %v", s.banPeerFile, err)
+		return
+	}
+
+	enc := json.NewEncoder(w)
+	defer w.Close()
+	if err := enc.Encode(&bannedList); err != nil {
+		log.Error("Failed to encode file %s: %v", s.banPeerFile, err)
+		return
+	}
+}
+
+func (s *Server) loadBannedInfo() error {
+	_, err := os.Stat(s.banPeerFile)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	r, err := os.Open(s.banPeerFile)
+	if err != nil {
+		return fmt.Errorf("%s error opening file: %v", s.banPeerFile, err)
+	}
+	defer r.Close()
+
+	var bannedList []*BannedInfo
+	dec := json.NewDecoder(r)
+	err = dec.Decode(&bannedList)
+	if err != nil {
+		return fmt.Errorf("error reading %s: %v", s.banPeerFile, err)
+	}
+
+	for _, info := range bannedList {
+		s.BanAddr(info.Address, info.CreateTime, info.BanUntil, info.Reason)
+	}
+
+	return nil
 }
 
 // handleRelayInvMsg deals with relaying inventory to peers that are not already
@@ -1340,11 +1602,9 @@ func (s *Server) handleRelayInvMsg(state *peerState, msg relayMsg) {
 				return
 			}
 
-			txD, ok := msg.data.(*mempool.TxEntry)
-			if !ok {
-				log.Warn("Underlying data for tx inv "+
-					"relay is not a *mempool.TxDesc: %T",
-					msg.data)
+			txD := lmempool.FindTxInMempool(msg.invVect.Hash)
+			if txD == nil {
+				log.Warn("not found TxEntry for tx(%v) while relaying", txD)
 				return
 			}
 
@@ -1371,6 +1631,10 @@ func (s *Server) handleRelayInvMsg(state *peerState, msg relayMsg) {
 		// have the inventory.
 		sp.QueueInventory(msg.invVect)
 	})
+}
+
+func (s *Server) handleMinedBlock(mb minedBlockMsg) {
+	s.syncManager.QueueMinedBlock(mb.block, mb.done)
 }
 
 // handleBroadcastMsg deals with broadcasting messages to peers.  It is invoked
@@ -1456,11 +1720,16 @@ func (s *Server) handleQuery(state *peerState, querymsg interface{}) {
 		}
 		for _, peer := range state.persistentPeers {
 			if peer.Addr() == msg.addr {
-				if msg.permanent {
-					msg.reply <- errors.New("peer already connected")
-				} else {
-					msg.reply <- errors.New("peer exists as a permanent peer")
-				}
+				msg.reply <- errors.New("node already added")
+				return
+			}
+		}
+		// It is possible that we already have a connection to the IP/port
+		// pszDest resolved to. In that case, drop the connection that was
+		// just created, and return the existing CNode instead.
+		for _, peer := range state.outboundPeers {
+			if peer.Addr() == msg.addr && peer.Connected() {
+				msg.reply <- nil
 				return
 			}
 		}
@@ -1536,6 +1805,16 @@ func (s *Server) handleQuery(state *peerState, querymsg interface{}) {
 	}
 }
 
+func (s *Server) handleConnectPeer(state *peerState, svrPeer *serverPeer) {
+	s.connectedPeers[svrPeer.Addr()] = svrPeer
+}
+
+func (s *Server) handleBanScore(state *peerState, bmsg *banScoreMsg) {
+	if sp, ok := s.connectedPeers[bmsg.peerAddr]; ok {
+		sp.addBanScore(bmsg.persistent, bmsg.transient, bmsg.reason)
+	}
+}
+
 // disconnectPeer attempts to drop the connection of a targeted peer in the
 // passed peer list. Targets are identified via usage of the passed
 // `compareFunc`, which should return `true` if the passed peer is the target
@@ -1608,12 +1887,23 @@ func newPeerConfig(sp *serverPeer) *peer.Config {
 // for disconnection.
 func (s *Server) inboundPeerConnected(conn net.Conn) {
 	sp := newServerPeer(s, false)
-	sp.isWhitelisted = isWhitelisted(conn.RemoteAddr())
-	sp.Peer = peer.NewInboundPeer(newPeerConfig(sp))
+	isWhitelisted := isWhitelisted(conn.RemoteAddr())
+	sp.Peer = peer.NewInboundPeer(newPeerConfig(sp), isWhitelisted)
 	sp.AssociateConnection(conn, s.MsgChan, func(peer *peer.Peer) {
 		s.syncManager.NewPeer(peer)
 	})
 	go s.peerDoneHandler(sp)
+
+	s.connectPeerChn <- sp
+	// if version msg is not received when connecting, add ban score
+	if !sp.VersionKnown() {
+		s.banScoreChn <- &banScoreMsg{
+			peerAddr:   sp.Addr(),
+			persistent: 0,
+			transient:  1,
+			reason:     "missing-version",
+		}
+	}
 }
 
 // outboundPeerConnected is invoked by the connection manager when a new
@@ -1623,14 +1913,14 @@ func (s *Server) inboundPeerConnected(conn net.Conn) {
 // manager of the attempt.
 func (s *Server) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) {
 	sp := newServerPeer(s, c.Permanent)
-	p, err := peer.NewOutboundPeer(newPeerConfig(sp), c.Addr.String())
+	isWhitelisted := isWhitelisted(conn.RemoteAddr())
+	p, err := peer.NewOutboundPeer(newPeerConfig(sp), c.Addr.String(), isWhitelisted)
 	if err != nil {
 		log.Debug("Cannot create outbound peer %s: %v", c.Addr, err)
 		s.connManager.Disconnect(c.ID())
 	}
 	sp.Peer = p
 	sp.connReq = c
-	sp.isWhitelisted = isWhitelisted(conn.RemoteAddr())
 	sp.AssociateConnection(conn, s.MsgChan, func(peer *peer.Peer) {
 		// Request known addresses if the server address manager needs
 		// more and the peer has a protocol version new enough to
@@ -1646,6 +1936,17 @@ func (s *Server) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) {
 	})
 	go s.peerDoneHandler(sp)
 	s.addrManager.Attempt(sp.NA())
+
+	s.connectPeerChn <- sp
+	// if version msg is not received when connecting, add ban score
+	if !sp.VersionKnown() {
+		s.banScoreChn <- &banScoreMsg{
+			peerAddr:   sp.Addr(),
+			persistent: 0,
+			transient:  1,
+			reason:     "missing-version",
+		}
+	}
 }
 
 // peerDoneHandler handles peer disconnects by notifiying the server that it's
@@ -1684,7 +1985,8 @@ func (s *Server) cycle() {
 		inboundPeers:    make(map[int32]*serverPeer),
 		persistentPeers: make(map[int32]*serverPeer),
 		outboundPeers:   make(map[int32]*serverPeer),
-		banned:          make(map[string]time.Time),
+		bannedAddr:      make(map[string]*BannedInfo),
+		bannedIPNet:     make(map[string]*BannedInfo),
 		outboundGroups:  make(map[string]int),
 	}
 
@@ -1721,10 +2023,24 @@ out:
 		case p := <-s.banPeers:
 			s.handleBanPeerMsg(state, p)
 
+		case bmsg := <-s.banAddress:
+			s.handleBanAddressMsg(state, bmsg)
+
+		case bmsg := <-s.unbanAddress:
+			s.handleUnbanAddressMsg(state, bmsg)
+
+		case msg := <-s.getBannedInfo:
+			s.handleGetBannedInfoMsg(state, msg)
+
+		case <-s.clearBanned:
+			s.handleClearBannedMsg(state)
+
 			// New inventory to potentially be relayed to other peers.
 		case invMsg := <-s.relayInv:
 			s.handleRelayInvMsg(state, invMsg)
 
+		case minedBlockMsg := <-s.minedBlock:
+			s.handleMinedBlock(minedBlockMsg)
 			// Message to broadcast to all connected peers except those
 			// which are excluded by the message.
 		case bmsg := <-s.broadcast:
@@ -1732,6 +2048,12 @@ out:
 
 		case qmsg := <-s.query:
 			s.handleQuery(state, qmsg)
+
+		case cmsg := <-s.connectPeerChn:
+			s.handleConnectPeer(state, cmsg)
+
+		case bmsg := <-s.banScoreChn:
+			s.handleBanScore(state, bmsg)
 
 		case <-s.quit:
 			// Disconnect all peers on server shutdown.
@@ -1776,10 +2098,51 @@ func (s *Server) BanPeer(sp *serverPeer) {
 	s.banPeers <- sp
 }
 
+func (s *Server) BanAddr(addr string, startTime int64, endTime int64, reason int) bool {
+	hasBannedChn := make(chan bool)
+	bmsg := &banAddressMsg{
+		address:      addr,
+		startTime:    startTime,
+		endTime:      endTime,
+		reason:       reason,
+		hasBannedChn: hasBannedChn,
+	}
+	s.banAddress <- bmsg
+	return <-hasBannedChn
+}
+
+func (s *Server) UnbanAddr(addr string) bool {
+	hasBannedChn := make(chan bool)
+	bmsg := &banAddressMsg{
+		address:      addr,
+		hasBannedChn: hasBannedChn,
+	}
+	s.unbanAddress <- bmsg
+	return <-hasBannedChn
+}
+
+func (s *Server) GetBannedInfo() []*BannedInfo {
+	bannedInfoChn := make(chan []*BannedInfo)
+	msg := &getBannedInfoMsg{
+		bannedInfoChn: bannedInfoChn,
+	}
+	s.getBannedInfo <- msg
+	return <-bannedInfoChn
+}
+
+func (s *Server) ClearBanned() {
+	msg := &clearBannedMsg{}
+	s.clearBanned <- msg
+}
+
 // RelayInventory relays the passed inventory vector to all connected peers
 // that are not already known to have it.
 func (s *Server) RelayInventory(invVect *wire.InvVect, data interface{}) {
 	s.relayInv <- relayMsg{invVect: invVect, data: data}
+}
+
+func (s *Server) HandleMinedBlock(pblock *block.Block, done chan error) {
+	s.minedBlock <- minedBlockMsg{pblock, done}
 }
 
 // RelayUpdatedTipBlocks relays blocks leads to new main chain
@@ -1800,6 +2163,8 @@ func (s *Server) RelayUpdatedTipBlocks(event *chain.TipUpdatedEvent) {
 	for i := len(blockIndexes) - 1; i >= 0; i-- {
 		index := blockIndexes[i]
 		iv := wire.NewInvVect(wire.InvTypeBlock, index.GetBlockHash())
+
+		//TODO: relay inventory through headers message
 		s.RelayInventory(iv, index.GetBlockHeader())
 	}
 }
@@ -1942,6 +2307,9 @@ func (s *Server) Start() {
 		go s.upnpUpdateThread()
 	}
 
+	if err := s.loadBannedInfo(); err != nil {
+		log.Error("loadBannedInfo error:%s", err.Error())
+	}
 }
 
 // Stop gracefully shuts down the server by stopping and disconnecting all
@@ -2101,11 +2469,21 @@ out:
 	} else {
 		log.Debug("successfully disestablished UPnP port mapping")
 	}
-
 	s.wg.Done()
 }
 
-func NewServer(chainParams *model.BitcoinParams, interrupt <-chan struct{}) (*Server, error) {
+func (s *Server) AddBanScore(peerAddr string, persistent uint32, transient uint32, reason string) {
+	bmsg := &banScoreMsg{
+		peerAddr:   peerAddr,
+		persistent: persistent,
+		transient:  transient,
+		reason:     reason,
+	}
+	log.Info("addBanScore peer:%s, reason:%s", peerAddr, reason)
+	s.banScoreChn <- bmsg
+}
+
+func NewServer(chainParams *model.BitcoinParams, ts *util.MedianTime, interrupt <-chan struct{}) (*Server, error) {
 
 	cfg := conf.Cfg
 
@@ -2137,16 +2515,25 @@ func NewServer(chainParams *model.BitcoinParams, interrupt <-chan struct{}) (*Se
 		newPeers:             make(chan *serverPeer, cfg.P2PNet.MaxPeers),
 		donePeers:            make(chan *serverPeer, cfg.P2PNet.MaxPeers),
 		banPeers:             make(chan *serverPeer, cfg.P2PNet.MaxPeers),
+		banAddress:           make(chan *banAddressMsg),
+		unbanAddress:         make(chan *banAddressMsg),
+		getBannedInfo:        make(chan *getBannedInfoMsg),
+		clearBanned:          make(chan *clearBannedMsg),
 		query:                make(chan interface{}),
 		relayInv:             make(chan relayMsg, cfg.P2PNet.MaxPeers),
+		minedBlock:           make(chan minedBlockMsg),
 		broadcast:            make(chan broadcastMsg, cfg.P2PNet.MaxPeers),
 		quit:                 make(chan struct{}),
 		modifyRebroadcastInv: make(chan interface{}),
 		peerHeightsUpdate:    make(chan updatePeerHeightsMsg),
 		services:             services,
 		nat:                  nat,
-		timeSource:           bitcointime.NewMedianTime(),
+		timeSource:           ts,
 		MsgChan:              msgChan,
+		connectPeerChn:       make(chan *serverPeer),
+		banScoreChn:          make(chan *banScoreMsg),
+		connectedPeers:       make(map[string]*serverPeer),
+		banPeerFile:          filepath.Join(cfg.DataDir, "banpeers.json"),
 	}
 
 	if cfg.P2PNet.TargetOutbound < 0 {
@@ -2212,6 +2599,7 @@ func NewServer(chainParams *model.BitcoinParams, interrupt <-chan struct{}) (*Se
 	s.syncManager.ProcessBlockCallBack = service.ProcessBlock
 	s.syncManager.ProcessBlockHeadCallBack = service.ProcessBlockHeader
 	s.syncManager.ProcessTransactionCallBack = service.ProcessTransaction
+	s.syncManager.AddBanScoreCallBack = s.AddBanScore
 
 	return s, nil
 }
@@ -2242,6 +2630,9 @@ func initListeners(amgr *addrmgr.AddrManager, listenAddrs []string, services wir
 		if err != nil {
 			log.Error("Can not parse default port %s for active chain: %v",
 				model.ActiveNetParams.DefaultPort, err)
+			for _, listener := range listeners {
+				listener.Close()
+			}
 			return nil, nil, err
 		}
 

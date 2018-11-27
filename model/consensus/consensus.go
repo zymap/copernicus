@@ -1,5 +1,7 @@
 package consensus
 
+import "errors"
+
 const (
 	//OneMegaByte  1MB
 	OneMegaByte = 1000000
@@ -12,8 +14,6 @@ const (
 
 	//DefaultMaxBlockSize  Default setting for maximum allowed size for a block, in bytes
 	DefaultMaxBlockSize = 32 * OneMegaByte
-	MinTxSize           = 62
-	MaxTxCount          = DefaultMaxBlockSize / MinTxSize
 	/*MaxBlockSigopsPerMb  The maximum allowed number of signature check operations per MB in a block
 	* (network rule) */
 	MaxBlockSigopsPerMb = 20000
@@ -24,6 +24,8 @@ const (
 	// CoinbaseMaturity means Coinbase transaction outputs can only be spent after this number of new
 	// blocks (network rule)
 	CoinbaseMaturity = 100
+
+	MinTxSize = 100
 )
 
 const (
@@ -39,7 +41,10 @@ const (
 // MAX_BLOCK_SIGOPS_PER_MB by the size of the block in MB rounded up to the
 // closest integer.
 
-func GetMaxBlockSigOpsCount(blockSize uint64) uint64 {
+func GetMaxBlockSigOpsCount(blockSize uint64) (uint64, error) {
+	if blockSize < 1 {
+		return 0, errors.New("block size is wrong")
+	}
 	roundedUp := 1 + ((blockSize - 1) / OneMegaByte)
-	return roundedUp * MaxBlockSigopsPerMb
+	return roundedUp * MaxBlockSigopsPerMb, nil
 }

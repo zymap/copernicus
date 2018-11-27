@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/copernet/copernicus/conf"
+	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/logic/lmempool"
 	"github.com/copernet/copernicus/model/block"
 	"github.com/copernet/copernicus/model/blockindex"
@@ -13,7 +14,11 @@ import (
 	"github.com/copernet/copernicus/persist"
 	"github.com/copernet/copernicus/persist/disk"
 	"github.com/copernet/copernicus/util"
+	"syscall"
+	"time"
 )
+
+var shutdownScheduled bool
 
 // ActivateBestChain Make the best chain active, in multiple steps. The result is either failure
 // or an activated best chain. pblock is either nullptr or a pointer to a block
@@ -29,6 +34,10 @@ func ActivateBestChain(pblock *block.Block) error {
 	// global.CsMain.Lock()
 	// defer global.CsMain.Unlock()
 	for {
+		if shutdownScheduled {
+			break
+		}
+
 		//	todo, Add channel for receive interruption from P2P/RPC
 		connTrace := make(connectTrace)
 
@@ -51,6 +60,10 @@ func ActivateBestChain(pblock *block.Block) error {
 
 		// Whether we have anything to do at all.
 		if pindexMostWork == nil || pindexMostWork == pindexOldTip {
+			return nil
+		}
+
+		if pindexOldTip != nil && pindexMostWork.ChainWork.Cmp(&pindexOldTip.ChainWork) <= 0 {
 			return nil
 		}
 
@@ -88,12 +101,29 @@ func ActivateBestChain(pblock *block.Block) error {
 	}
 	// Write changes periodically to disk, after relay.
 	err := disk.FlushStateToDisk(disk.FlushStatePeriodic, 0)
+	stopAtHeightIfNeed(chain.GetInstance().Tip().Height)
 	return err
+}
+
+func stopAtHeightIfNeed(currentHeight int32) {
+	if conf.Args.StopAtHeight != -1 && conf.Args.StopAtHeight == currentHeight {
+		shutdownScheduled = true
+		log.Warn("got --stopatheight height %d, exiting scheduled", currentHeight)
+		go func() {
+			time.Sleep(2 * time.Second)
+			log.Warn("got --stopatheight height %d, exiting now", currentHeight)
+			syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+		}()
+	}
 }
 
 // sendNotifications When we reach this point, we switched to a new tip.
 // Notify external listeners about the new tip.
 func sendNotifications(pindexOldTip *blockindex.BlockIndex, pblock *block.Block) {
+	if pblock == nil {
+		return
+	}
+
 	gChain := chain.GetInstance()
 
 	gChain.SendNotification(chain.NTBlockConnected, pblock)
@@ -174,7 +204,7 @@ func ActivateBestChainStep(pindexMostWork *blockindex.BlockIndex,
 		currentTip := gChain.Tip()
 		lmempool.RemoveForReorg(currentTip.Height+1, int(tx.StandardLockTimeVerifyFlags))
 	}
-	lmempool.CheckMempool()
+	lmempool.CheckMempool(chain.GetInstance().Height())
 	return nil
 }
 
@@ -280,7 +310,7 @@ func CheckBlockIndex() error {
 		if !pruneState.HavePruned {
 			// If we've never pruned, then HAVE_DATA should be equivalent to nTx
 			// > 0
-			if !pindex.HasData() != (pindex.TxCount == 0) {
+			if pindex.HasData() != (pindex.TxCount > 0) {
 				err := fmt.Errorf("TxCount=%d, conflict with HasData()", pindex.TxCount)
 				return err
 			}

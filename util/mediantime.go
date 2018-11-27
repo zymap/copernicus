@@ -1,4 +1,4 @@
-package bitcointime
+package util
 
 import (
 	"math"
@@ -8,6 +8,8 @@ import (
 
 	"github.com/copernet/copernicus/log"
 )
+
+var globalMedianTime *MedianTime
 
 // int64Sorter implements sort.Interface to allow a slice of 64-bit integers to
 // be sorted.
@@ -52,9 +54,10 @@ var _ MedianTime
 func (medianTime *MedianTime) AdjustedTime() time.Time {
 	medianTime.lock.Lock()
 	defer medianTime.lock.Unlock()
-	now := time.Unix(time.Now().Unix(), 0)
+	now := time.Unix(GetTime(), 0)
 	return now.Add(time.Duration(medianTime.offsetsSecs) * time.Second)
 }
+
 func (medianTime *MedianTime) AddTimeSample(sourceID string, timeVal time.Time) {
 	medianTime.lock.Lock()
 	defer medianTime.lock.Unlock()
@@ -63,7 +66,7 @@ func (medianTime *MedianTime) AddTimeSample(sourceID string, timeVal time.Time) 
 	}
 	medianTime.knowIDs[sourceID] = struct{}{}
 
-	now := time.Unix(time.Now().Unix(), 0)
+	now := time.Unix(GetTime(), 0)
 	offsetSecs := int64(timeVal.Sub(now).Seconds())
 	numOffsets := len(medianTime.offsets)
 	if numOffsets == MaxMedianTimeRetries && MaxMedianTimeRetries > 0 {
@@ -103,15 +106,23 @@ func (medianTime *MedianTime) AddTimeSample(sourceID string, timeVal time.Time) 
 	}
 
 }
+
 func (medianTime *MedianTime) Offset() time.Duration {
 	medianTime.lock.Lock()
 	defer medianTime.lock.Unlock()
 	return time.Duration(medianTime.offsetsSecs) * time.Second
 }
+
 func NewMedianTime() *MedianTime {
-	medianTime := MedianTime{
+	return &MedianTime{
 		knowIDs: make(map[string]struct{}),
 		offsets: make([]int64, 0, MaxMedianTimeRetries),
 	}
-	return &medianTime
+}
+
+func GetTimeSource() *MedianTime {
+	if globalMedianTime == nil {
+		globalMedianTime = NewMedianTime()
+	}
+	return globalMedianTime
 }

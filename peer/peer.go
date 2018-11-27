@@ -24,7 +24,6 @@ import (
 	"github.com/copernet/copernicus/model/chain"
 	"github.com/copernet/copernicus/net/wire"
 	"github.com/copernet/copernicus/util"
-	"github.com/davecgh/go-spew/spew"
 )
 
 const (
@@ -59,7 +58,7 @@ const (
 
 	// stallTickInterval is the interval of time between each check for
 	// stalled peers.
-	stallTickInterval = 15 * time.Second
+	stallTickInterval = 60 * time.Second
 
 	// stallResponseTimeout is the base maximum amount of time messages that
 	// expect a response will wait before disconnecting the peer for
@@ -452,7 +451,7 @@ type Peer struct {
 	protocolVersion      uint32 // negotiated protocol version
 	sendHeadersPreferred bool   // peer sent a sendheaders message
 	verAckReceived       bool
-	witnessEnabled       bool
+	isWhitelisted        bool
 
 	wireEncoding wire.MessageEncoding
 
@@ -488,6 +487,8 @@ type Peer struct {
 	requestingDataCnt uint64
 
 	reqMempoolOnce sync.Once
+
+	newPeerCallback func(*Peer)
 }
 
 func (p *Peer) RequestMemPool() {
@@ -821,16 +822,11 @@ func (p *Peer) WantsHeaders() bool {
 	return sendHeadersPreferred
 }
 
-// IsWitnessEnabled returns true if the peer has signalled that it supports
-// segregated witness.
-//
-// This function is safe for concurrent access.
-func (p *Peer) IsWitnessEnabled() bool {
+// SetPreferHeaders set the flag that this peer prefer headers instead of inv
+func (p *Peer) SetPreferHeaders() {
 	p.flagsMtx.Lock()
-	witnessEnabled := p.witnessEnabled
+	p.sendHeadersPreferred = true
 	p.flagsMtx.Unlock()
-
-	return witnessEnabled
 }
 
 // localVersionMsg creates a version message that can be used to send to the
@@ -875,6 +871,7 @@ func (p *Peer) localVersionMsg() (*wire.MsgVersion, error) {
 	// Generate a unique nonce for this peer so self connections can be
 	// detected.  This is accomplished by adding it to a size-limited map of
 	// recently seen nonces.
+	rand.Seed(time.Now().UTC().UnixNano())
 	nonce := uint64(rand.Int63())
 	sentNonces.Add(nonce)
 
@@ -899,7 +896,6 @@ func (p *Peer) localVersionMsg() (*wire.MsgVersion, error) {
 	//      actually supports
 	//    - Set the remote netaddress services to the what was advertised by
 	//      by the remote peer in its version message
-	msg.AddrYou.Services = wire.SFNodeNetwork
 
 	// Advertise the services flag
 	msg.Services = p.Cfg.Services
@@ -1041,6 +1037,12 @@ func (p *Peer) PushGetHeadersMsg(locator chain.BlockLocator, stopHash *util.Hash
 	return nil
 }
 
+// PushSendHeadersMsg sends a sendheaders msg to indicate that i prefer headers instead of inv
+func (p *Peer) PushSendHeadersMsg() {
+	msg := wire.NewMsgSendHeaders()
+	p.QueueMessage(msg, nil)
+}
+
 // PushRejectMsg sends a reject message for the provided command, reject code,
 // reject reason, and hash.  The hash will only be used when the command is a tx
 // or block and should be nil in other cases.  The wait parameter will cause the
@@ -1130,21 +1132,33 @@ func (p *Peer) handleRemoteVersionMsg(msg *wire.MsgVersion) error {
 
 	// Determine if the peer would like to receive witness data with
 	// transactions, or not.
-	if p.services&wire.SFNodeWitness == wire.SFNodeWitness {
-		p.witnessEnabled = true
-	}
+
 	p.flagsMtx.Unlock()
 
-	// Once the version message has been exchanged, we're able to determine
-	// if this peer knows how to encode witness data over the wire
-	// protocol. If so, then we'll switch to a decoding mode which is
-	// prepared for the new transaction format introduced as part of
-	// BIP0144.
-	if p.services&wire.SFNodeWitness == wire.SFNodeWitness {
-		p.wireEncoding = wire.WitnessEncoding
+	return nil
+}
+
+func (p *Peer) HandleVersionMsg(msg *wire.MsgVersion) {
+	if err := p.handleRemoteVersionMsg(msg); err != nil {
+		log.Error("handleRemoteVersionMsg error:%s", err.Error())
+		return
 	}
 
-	return nil
+	if p.Cfg.Listeners.OnVersion != nil {
+		p.Cfg.Listeners.OnVersion(p, msg)
+	}
+
+	if p.Inbound() {
+		p.writeLocalVersionMsg()
+	}
+
+	// Send our verack message now that the IO processing machinery has started.
+	p.QueueMessage(wire.NewMsgVerAck(), nil)
+
+	// call the callback function after ver msg
+	if p.newPeerCallback != nil {
+		p.newPeerCallback(p)
+	}
 }
 
 // HandlePingMsg is invoked when a peer receives a ping bitcoin message.  For
@@ -1203,19 +1217,7 @@ func (p *Peer) readMessage(encoding wire.MessageEncoding) (wire.Message, []byte,
 
 	// Use closures to log expensive operations so they are only run when
 	// the logging level requires it.
-	log.Debug("read message: %v", newLogClosure(func() string {
-		// Debug summary of message.
-		summary := messageSummary(msg)
-		if len(summary) > 0 {
-			summary = " (" + summary + ")"
-		}
-		return fmt.Sprintf("Received %v%s from %s",
-			msg.Command(), summary, p)
-	}))
-
-	// log.Trace("%v", newLogClosure(func() string {
-	// 	return spew.Sdump(buf)
-	// }))
+	log.Debug("read summary %v (%s) from %s", msg.Command(), messageSummary(msg), p)
 
 	return msg, buf, nil
 }
@@ -1229,27 +1231,7 @@ func (p *Peer) writeMessage(msg wire.Message, enc wire.MessageEncoding) error {
 
 	// Use closures to log expensive operations so they are only run when
 	// the logging level requires it.
-	log.Debug("%v", newLogClosure(func() string {
-		// Debug summary of message.
-		summary := messageSummary(msg)
-		if len(summary) > 0 {
-			summary = " (" + summary + ")"
-		}
-		return fmt.Sprintf("Sending %v%s to %s", msg.Command(),
-			summary, p)
-	}))
-	log.Trace("write message to (%s) : %v", p.Addr(), newLogClosure(func() string {
-		return spew.Sdump(msg)
-	}))
-	//log.Trace("%v", newLogClosure(func() string {
-	//	var buf bytes.Buffer
-	//	_, err := wire.WriteMessageWithEncodingN(&buf, msg, p.ProtocolVersion(),
-	//		p.Cfg.ChainParams.BitcoinNet, enc)
-	//	if err != nil {
-	//		return err.Error()
-	//	}
-	//	return spew.Sdump(buf.Bytes())
-	//}))
+	log.Debug("write summary %v (%s) to %s", msg.Command(), messageSummary(msg), p)
 
 	// Write the message to the peer.
 	n, err := wire.WriteMessageWithEncodingN(p.conn, msg,
@@ -1331,9 +1313,9 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msg wire.
 		// Expects an inv message.
 		pendingResponses[wire.CmdInv] = deadline
 
-	case wire.CmdGetBlocks:
-		// Expects an inv message.
-		pendingResponses[wire.CmdInv] = deadline
+	// case wire.CmdGetBlocks:
+	// 	// Expects an inv message.
+	// 	pendingResponses[wire.CmdInv] = deadline
 
 	case wire.CmdGetData:
 		// Expects a block, merkleblock, tx, or notfound message.
@@ -1530,6 +1512,7 @@ out:
 		rmsg, buf, err := p.readMessage(p.wireEncoding)
 		idleTimer.Stop()
 		if err != nil {
+			log.Debug("Read Message error from %s, %v", p, err)
 			// In order to allow regression tests with malformed messages, don't
 			// disconnect the peer when we're in regression test mode and the
 			// error is one of the allowed errors.
@@ -1560,7 +1543,7 @@ out:
 			}
 			break out
 		}
-		log.Info("Read message %T inHandle", rmsg)
+		log.Info("Read message %T inHandle from %s", rmsg, p)
 		atomic.StoreInt64(&p.lastRecv, time.Now().Unix())
 		p.stallControl <- stallControlMsg{sccReceiveMessage, rmsg}
 
@@ -1954,20 +1937,34 @@ func (p *Peer) start(phCh chan<- *PeerMessage, newPeerCallback func(*Peer)) erro
 		}
 	}()
 
+	missVersion := false
 	// Negotiate the protocol within the specified negotiateTimeout.
 	select {
 	case err := <-negotiateErr:
 		if err != nil {
-			return err
+			// if version msg is missing, keep the connection and add ban score later
+			if err.Error() == "missing-version" {
+				missVersion = true
+			} else {
+				return err
+			}
 		}
 	case <-time.After(negotiateTimeout):
 		return errors.New("protocol negotiation timeout")
 	}
 	log.Debug("Connected to %s", p.Addr())
-	// Send our verack message now that the IO processing machinery has started.
-	p.QueueMessage(wire.NewMsgVerAck(), nil)
 
-	newPeerCallback(p)
+	if !missVersion {
+		// Send our verack message now that the IO processing machinery has started.
+		p.QueueMessage(wire.NewMsgVerAck(), nil)
+
+		// call the callback function after ver msg
+		newPeerCallback(p)
+	} else {
+		// save the callback and call it later
+		p.newPeerCallback = newPeerCallback
+	}
+
 	// The protocol has been negotiated successfully so start processing input
 	// and output messages.
 	go p.stallHandler()
@@ -1999,12 +1996,8 @@ func (p *Peer) readRemoteVersionMsg() error {
 
 	remoteVerMsg, ok := msg.(*wire.MsgVersion)
 	if !ok {
-		errStr := "A version message must precede all others"
-		log.Error(errStr)
-
-		rejectMsg := wire.NewMsgReject(msg.Command(), errcode.RejectMalformed,
-			errStr)
-		return p.writeMessage(rejectMsg, wire.LatestEncoding)
+		log.Error("A version message must precede all others")
+		return errors.New("missing-version")
 	}
 
 	if err := p.handleRemoteVersionMsg(remoteVerMsg); err != nil {
@@ -2049,10 +2042,14 @@ func (p *Peer) negotiateOutboundProtocol() error {
 	return p.readRemoteVersionMsg()
 }
 
+func (p *Peer) IsWhitelisted() bool {
+	return p.isWhitelisted
+}
+
 // newPeerBase returns a new base bitcoin peer based on the inbound flag.  This
 // is used by the NewInboundPeer and NewOutboundPeer functions to perform base
 // setup needed by both types of peers.
-func newPeerBase(origCfg *Config, inbound bool) *Peer {
+func newPeerBase(origCfg *Config, inbound bool, isWhitelisted bool) *Peer {
 	// Default to the max supported protocol version if not specified by the
 	// caller.
 	cfg := *origCfg // Copy to avoid mutating caller.
@@ -2081,19 +2078,20 @@ func newPeerBase(origCfg *Config, inbound bool) *Peer {
 		Cfg:             cfg, // Copy so caller can't mutate.
 		services:        cfg.Services,
 		protocolVersion: cfg.ProtocolVersion,
+		isWhitelisted:   isWhitelisted,
 	}
 	return &p
 }
 
 // NewInboundPeer returns a new inbound bitcoin peer. Use Start to begin
 // processing incoming and outgoing messages.
-func NewInboundPeer(cfg *Config) *Peer {
-	return newPeerBase(cfg, true)
+func NewInboundPeer(cfg *Config, isWhitelisted bool) *Peer {
+	return newPeerBase(cfg, true, isWhitelisted)
 }
 
 // NewOutboundPeer returns a new outbound bitcoin peer.
-func NewOutboundPeer(cfg *Config, addr string) (*Peer, error) {
-	p := newPeerBase(cfg, false)
+func NewOutboundPeer(cfg *Config, addr string, isWhitelisted bool) (*Peer, error) {
+	p := newPeerBase(cfg, false, isWhitelisted)
 	p.addr = addr
 
 	host, portStr, err := net.SplitHostPort(addr)

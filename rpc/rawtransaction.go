@@ -3,8 +3,9 @@ package rpc
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"github.com/pkg/errors"
+	"github.com/copernet/copernicus/model/wallet"
 	"gopkg.in/fatih/set.v0"
 	"math"
 	"strconv"
@@ -14,9 +15,9 @@ import (
 	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/logic/lmempool"
 	"github.com/copernet/copernicus/logic/lmerkleblock"
-	"github.com/copernet/copernicus/logic/lscript"
 	"github.com/copernet/copernicus/logic/ltx"
 	"github.com/copernet/copernicus/logic/lutxo"
+	"github.com/copernet/copernicus/logic/lwallet"
 	"github.com/copernet/copernicus/model/blockindex"
 	"github.com/copernet/copernicus/model/chain"
 	"github.com/copernet/copernicus/model/mempool"
@@ -63,10 +64,8 @@ func handleGetRawTransaction(s *Server, cmd interface{}, closeChan <-chan struct
 
 	tx, hashBlock, ok := GetTransaction(txHash, true)
 	if !ok {
-		return nil, btcjson.RPCError{
-			Code:    btcjson.ErrRPCInvalidAddressOrKey,
-			Message: "No such mempool or blockchain transaction. Use gettransaction for wallet transactions.",
-		}
+		return nil, btcjson.NewRPCError(btcjson.ErrRPCInvalidAddressOrKey,
+			"No such mempool or blockchain transaction. Use gettransaction for wallet transactions.")
 	}
 
 	buf := bytes.NewBuffer(nil)
@@ -79,16 +78,16 @@ func handleGetRawTransaction(s *Server, cmd interface{}, closeChan <-chan struct
 		return strHex, nil
 	}
 
-	rawTxn, err := getTxRawResult(tx, hashBlock, strHex)
-	if err != nil {
-		return nil, err
+	rawTxn, rpcErr := getTxRawResult(tx, hashBlock, strHex)
+	if rpcErr != nil {
+		return nil, rpcErr
 	}
 	return rawTxn, nil
 }
 
 // getTxRawResult converts the passed transaction and associated parameters
 // to a raw transaction JSON object.
-func getTxRawResult(tx *tx.Tx, hashBlock *util.Hash, strHex string) (*btcjson.TxRawResult, error) {
+func getTxRawResult(tx *tx.Tx, hashBlock *util.Hash, strHex string) (*btcjson.TxRawResult, *btcjson.RPCError) {
 	hash := tx.GetHash()
 	txReply := &btcjson.TxRawResult{
 		Hex:      strHex,
@@ -101,7 +100,7 @@ func getTxRawResult(tx *tx.Tx, hashBlock *util.Hash, strHex string) (*btcjson.Tx
 		Vout:     getVoutList(tx),
 	}
 
-	if !hashBlock.IsNull() {
+	if hashBlock != nil && !hashBlock.IsNull() {
 		txReply.BlockHash = hashBlock.String()
 		bindex := chain.GetInstance().FindBlockIndex(*hashBlock)
 		if bindex != nil {
@@ -188,7 +187,7 @@ func ScriptToAsmStr(s *script.Script, attemptSighashDecode bool) string {
 						// TODO: Remove after the Hard Fork.
 						flags |= script.ScriptEnableSigHashForkID
 					}
-					err := script.CheckSignatureEncoding(vch, uint32(flags))
+					err := script.CheckTransactionSignatureEncoding(vch, uint32(flags))
 					if err == nil {
 						sigHashType := int(vch[len(vch)-1])
 						for desc, hashType := range mapSigHashValues {
@@ -300,25 +299,22 @@ func handleCreateRawTransaction(s *Server, cmd interface{}, closeChan <-chan str
 
 	lockTime := uint32(0)
 	if c.LockTime != nil && (*c.LockTime < 0 || *c.LockTime > int64(script.SequenceFinal)) {
-		return nil, &btcjson.RPCError{
-			Code:    btcjson.ErrRPCInvalidParameter,
-			Message: "LockTime out of range",
-		}
+		return nil, btcjson.NewRPCError(btcjson.ErrRPCInvalidParameter, "LockTime out of range")
 	}
 	transaction := tx.NewTx(lockTime, tx.DefaultVersion)
 
 	for _, input := range c.Inputs {
-		txIn, err := createRawTxInput(&input, lockTime)
-		if err != nil {
-			return nil, err
+		txIn, rpcErr := createRawTxInput(&input, lockTime)
+		if rpcErr != nil {
+			return nil, rpcErr
 		}
 		transaction.AddTxIn(txIn)
 	}
 
 	for address, cost := range c.Outputs {
-		txOut, err := createRawTxOutput(address, cost)
-		if err != nil {
-			return nil, err
+		txOut, rpcErr := createRawTxOutput(address, cost)
+		if rpcErr != nil {
+			return nil, rpcErr
 		}
 		transaction.AddTxOut(txOut)
 	}
@@ -327,151 +323,165 @@ func handleCreateRawTransaction(s *Server, cmd interface{}, closeChan <-chan str
 	err := transaction.Serialize(buf)
 	if err != nil {
 		log.Error("rawTransaction:serialize tx failed: %v", err)
-		return "", err
+		return "", btcjson.ErrRPCInternal
 	}
 
 	return hex.EncodeToString(buf.Bytes()), nil
 }
 
-func createRawTxInput(input *btcjson.TransactionInput, lockTime uint32) (*txin.TxIn, error) {
+func createRawTxInput(input *btcjson.TransactionInput, lockTime uint32) (*txin.TxIn, *btcjson.RPCError) {
 	hash, err := util.GetHashFromStr(input.Txid)
 	if err != nil {
 		return nil, rpcDecodeHexError(input.Txid)
 	}
 
 	if input.Vout < 0 {
-		return nil, btcjson.RPCError{
-			Code:    btcjson.ErrInvalidParameter,
-			Message: "Invalid parameter, vout must be positive",
-		}
+		return nil, btcjson.NewRPCError(btcjson.ErrInvalidParameter,
+			"Invalid parameter, vout must be positive")
 	}
 
 	sequence := uint32(math.MaxUint32)
 	if input.Sequence != nil {
 		if *input.Sequence < 0 || *input.Sequence > math.MaxUint32 {
-			return nil, btcjson.RPCError{
-				Code:    btcjson.ErrInvalidParameter,
-				Message: "Invalid parameter, sequence number is out of range",
-			}
+			return nil, btcjson.NewRPCError(btcjson.ErrInvalidParameter,
+				"Invalid parameter, sequence number is out of range")
 		}
 		sequence = uint32(*input.Sequence)
 	} else if lockTime != 0 {
 		sequence = math.MaxUint32 - 1
 	}
 
-	txIn := txin.NewTxIn(outpoint.NewOutPoint(*hash, input.Vout), &script.Script{}, sequence)
+	txIn := txin.NewTxIn(outpoint.NewOutPoint(*hash, input.Vout), script.NewEmptyScript(), sequence)
 	return txIn, nil
 }
 
-func createRawTxOutput(address string, cost interface{}) (*txout.TxOut, error) {
+func createRawTxOutput(address string, cost btcjson.AmountType) (*txout.TxOut, *btcjson.RPCError) {
 	var nullData []byte
-	var err error
+	var rpcErr *btcjson.RPCError
 	txAmount := amount.Amount(0)
 
 	if address == "data" {
 		data, ok := cost.(string)
 		if !ok {
-			return nil, btcjson.RPCError{
-				Code:    btcjson.ErrRPCType,
-				Message: "Data is not a string",
-			}
+			return nil, btcjson.NewRPCError(btcjson.ErrRPCType, "Data is not a string")
 		}
+		var err error
 		if nullData, err = hex.DecodeString(data); err != nil {
 			return nil, rpcDecodeHexError(data)
 		}
 	} else {
-		if txAmount, err = amountFromValue(cost); err != nil {
-			return nil, err
+		if txAmount, rpcErr = amountFromValue(cost); rpcErr != nil {
+			return nil, rpcErr
 		}
 	}
 
-	scriptPubKey, err := getStandardScriptPubKey(address, nullData)
-	if err != nil {
-		return nil, err
+	scriptPubKey, rpcErr := getStandardScriptPubKey(address, nullData)
+	if rpcErr != nil {
+		return nil, rpcErr
 	}
 
 	txOut := txout.NewTxOut(txAmount, scriptPubKey)
 	return txOut, nil
 }
 
-func amountFromValue(amountParam interface{}) (amount.Amount, error) {
+func amountFromValue(amountParam btcjson.AmountType) (amount.Amount, *btcjson.RPCError) {
 	amountVal, ok := amountParam.(float64)
 	if !ok {
 		amountValStr, ok := amountParam.(string)
 		if !ok {
-			return 0, btcjson.RPCError{
-				Code:    btcjson.ErrRPCType,
-				Message: "Amount is not a number or string",
-			}
+			return 0, btcjson.NewRPCError(btcjson.ErrRPCType, "Amount is not a number or string")
 		}
 		var err error
 		if amountVal, err = strconv.ParseFloat(amountValStr, 64); err != nil {
-			return 0, btcjson.RPCError{
-				Code:    btcjson.ErrRPCType,
-				Message: "Invalid amount",
-			}
+			return 0, btcjson.NewRPCError(btcjson.ErrRPCType, "Invalid amount")
 		}
 	}
 	amt, err := amount.NewAmount(amountVal)
 	if err != nil || !amount.MoneyRange(amt) {
-		return 0, btcjson.RPCError{
-			Code:    btcjson.ErrRPCType,
-			Message: "Amount out of range",
-		}
+		return 0, btcjson.NewRPCError(btcjson.ErrRPCType, "Amount out of range")
 	}
 	return amt, nil
 }
 
-func getStandardScriptPubKey(address string, nullData []byte) (*script.Script, error) {
-	scriptPubKey := script.NewEmptyScript()
+func decodeAddress(address string) (cashaddr.AddressType, []byte, *btcjson.RPCError) {
+	var keyHash []byte
+	var addrType cashaddr.AddressType
 
-	if nullData != nil {
-		// NullData
-		scriptPubKey.PushOpCode(opcodes.OP_RETURN)
-		scriptPubKey.PushSingleData(nullData)
-		return scriptPubKey, nil
-	}
-
-	var addrData []byte
-	addrType := script.ScriptNonStandard
 	if legacyAddr, err := script.AddressFromString(address); err == nil {
 		switch legacyAddr.GetVersion() {
 		case script.AddressVerPubKey():
-			addrType = script.ScriptPubkeyHash
+			addrType = cashaddr.P2PKH
 		case script.AddressVerScript():
-			addrType = script.ScriptHash
+			addrType = cashaddr.P2SH
 		}
-		addrData = legacyAddr.EncodeToPubKeyHash()
-	} else if cashAddr, err := cashaddr.DecodeAddress(address, chain.GetInstance().GetParams()); err == nil {
-		switch cashAddr.(type) {
-		case *cashaddr.CashAddressPubKeyHash:
-			addrType = script.ScriptPubkeyHash
-		case *cashaddr.CashAddressScriptHash:
-			addrType = script.ScriptHash
-		}
-		addrData = cashAddr.ScriptAddress()
-	}
+		keyHash = legacyAddr.EncodeToPubKeyHash()
 
-	if addrType == script.ScriptPubkeyHash {
-		// P2PKH
-		scriptPubKey.PushOpCode(opcodes.OP_DUP)
-		scriptPubKey.PushOpCode(opcodes.OP_HASH160)
-		scriptPubKey.PushSingleData(addrData)
-		scriptPubKey.PushOpCode(opcodes.OP_EQUALVERIFY)
-		scriptPubKey.PushOpCode(opcodes.OP_CHECKSIG)
-	} else if addrType == script.ScriptHash {
-		// P2SH
-		scriptPubKey.PushOpCode(opcodes.OP_HASH160)
-		scriptPubKey.PushSingleData(addrData)
-		scriptPubKey.PushOpCode(opcodes.OP_EQUAL)
 	} else {
-		return nil, btcjson.RPCError{
-			Code:    btcjson.ErrRPCInvalidAddressOrKey,
-			Message: "Invalid Bitcoin address: " + address,
+		// try cash address
+		var err error
+		if keyHash, _, addrType, err = cashaddr.CheckDecodeCashAddress(address); err != nil {
+			return addrType, nil, btcjson.NewRPCError(btcjson.ErrRPCInvalidAddressOrKey,
+				"Invalid Bitcoin address: "+address)
 		}
 	}
 
-	return scriptPubKey, nil
+	return addrType, keyHash, nil
+}
+
+func generateScript(data ...interface{}) (*script.Script, error) {
+	sc := script.NewEmptyScript()
+	for _, item := range data {
+		switch item.(type) {
+		case int:
+			if err := sc.PushOpCode(item.(int)); err != nil {
+				return nil, err
+			}
+		case []byte:
+			if err := sc.PushSingleData(item.([]byte)); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, errors.New("push unknown type")
+		}
+	}
+	return sc, nil
+}
+
+func getStandardScriptPubKey(address string, nullData []byte) (*script.Script, *btcjson.RPCError) {
+	if nullData != nil {
+		// NullData
+		scriptPubKey, err := generateScript(opcodes.OP_RETURN, nullData)
+		if err != nil {
+			log.Error("generateScript error:%s", err.Error())
+			return nil, btcjson.ErrRPCInternal
+		}
+		return scriptPubKey, nil
+	}
+
+	addrType, keyHash, rpcErr := decodeAddress(address)
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
+
+	if addrType == cashaddr.P2PKH {
+		scriptPubKey, err := generateScript(opcodes.OP_DUP, opcodes.OP_HASH160, keyHash,
+			opcodes.OP_EQUALVERIFY, opcodes.OP_CHECKSIG)
+		if err != nil {
+			log.Error("generateScript error:%s", err.Error())
+			return nil, btcjson.ErrRPCInternal
+		}
+		return scriptPubKey, nil
+
+	} else if addrType == cashaddr.P2SH {
+		scriptPubKey, err := generateScript(opcodes.OP_HASH160, keyHash, opcodes.OP_EQUAL)
+		if err != nil {
+			log.Error("generateScript error:%s", err.Error())
+			return nil, btcjson.ErrRPCInternal
+		}
+		return scriptPubKey, nil
+	}
+
+	return nil, btcjson.NewRPCError(btcjson.ErrRPCInvalidAddressOrKey, "Invalid Bitcoin address: "+address)
 }
 
 func handleDecodeRawTransaction(s *Server, cmd interface{}, closeChan <-chan struct{}) (interface{}, error) {
@@ -485,11 +495,9 @@ func handleDecodeRawTransaction(s *Server, cmd interface{}, closeChan <-chan str
 		err = transaction.Unserialize(bytes.NewReader(serializedTx))
 	}
 	if err != nil || int(transaction.SerializeSize()) != len(serializedTx) {
-		return nil, &btcjson.RPCError{
-			Code:    btcjson.ErrRPCDeserialization,
-			Message: "TX decode failed",
-		}
+		return nil, btcjson.NewRPCError(btcjson.ErrRPCDeserialization, "TX decode failed")
 	}
+
 	txHash := transaction.GetHash()
 
 	// Create and return the result.
@@ -558,50 +566,47 @@ func handleSendRawTransaction(s *Server, cmd interface{}, closeChan <-chan struc
 	}
 
 	entry := mempool.GetInstance().FindTx(hash)
+
 	if entry == nil && !inChain {
 		err = lmempool.AcceptTxToMemPool(&txn)
-
 		if err != nil {
-			return nil, btcjson.RPCError{
-				Code:    rpcErrorOfAcceptTx(err),
-				Message: "mempool reject the transaction for: " + err.Error(),
-			}
+			return nil, rpcErrorOfAcceptTx(err)
 		}
 	} else if inChain {
-		return nil, btcjson.RPCError{
-			Code:    btcjson.RPCTransactionAlreadyInChain,
-			Message: "transaction already in block chain",
-		}
+		return nil, btcjson.NewRPCError(btcjson.RPCTransactionAlreadyInChain,
+			"transaction already in block chain")
 	}
 
 	txInvMsg := wire.NewInvVect(wire.InvTypeTx, &hash)
 	_, err = server.ProcessForRPC(txInvMsg)
 	if err != nil {
+		log.Info("handleSendRawTransaction process InvTypeTx msg error:%s", err.Error())
 		return nil, btcjson.ErrRPCInternal
 	}
 
 	return hash.String(), nil
 }
 
-func rpcErrorOfAcceptTx(err error) btcjson.RPCErrorCode {
+func rpcErrorOfAcceptTx(err error) *btcjson.RPCError {
 	missingInputs := errcode.IsErrorCode(err, errcode.TxErrNoPreviousOut)
 	if missingInputs {
-		return btcjson.RPCTransactionError
+		return btcjson.NewRPCError(btcjson.RPCTransactionError, "Missing inputs")
 	}
 
 	_, _, isReject := errcode.IsRejectCode(err)
 	if isReject {
-		return btcjson.RPCTransactionRejected
+		return btcjson.NewRPCError(btcjson.RPCTransactionRejected, err.Error())
+
 	}
 
-	return btcjson.ErrUnDefined
+	return btcjson.NewRPCError(btcjson.ErrUnDefined, err.Error())
 }
 
 var mapSigHashValues = map[string]int{
-	"ALL":                     crypto.SigHashAll,
-	"ALL|ANYONECANPAY":        crypto.SigHashAll | crypto.SigHashAnyoneCanpay,
-	"ALL|FORKID":              crypto.SigHashAll | crypto.SigHashForkID,
-	"ALL|FORKID|ANYONECANPAY": crypto.SigHashAll | crypto.SigHashForkID | crypto.SigHashAnyoneCanpay,
+	"ALL":                        crypto.SigHashAll,
+	"ALL|ANYONECANPAY":           crypto.SigHashAll | crypto.SigHashAnyoneCanpay,
+	"ALL|FORKID":                 crypto.SigHashAll | crypto.SigHashForkID,
+	"ALL|FORKID|ANYONECANPAY":    crypto.SigHashAll | crypto.SigHashForkID | crypto.SigHashAnyoneCanpay,
 	"NONE":                       crypto.SigHashNone,
 	"NONE|ANYONECANPAY":          crypto.SigHashNone | crypto.SigHashAnyoneCanpay,
 	"NONE|FORKID":                crypto.SigHashNone | crypto.SigHashForkID,
@@ -636,99 +641,38 @@ func handleSignRawTransaction(s *Server, cmd interface{}, closeChan <-chan struc
 		transaction := tx.NewEmptyTx()
 		err = transaction.Unserialize(bytes.NewReader(txData[totalSerializeSize:]))
 		if err != nil {
-			return nil, &btcjson.RPCError{
-				Code:    btcjson.ErrRPCDeserialization,
-				Message: "TX decode failed: " + err.Error(),
-			}
+			return nil, btcjson.NewRPCError(btcjson.ErrRPCDeserialization, "TX decode failed: "+err.Error())
 		}
 		txVariants = append(txVariants, transaction)
 		totalSerializeSize += int(transaction.SerializeSize())
 	}
 
 	mergedTx := txVariants[0]
-	coinsMap, redeemScripts, err := getCoins(mergedTx.GetIns(), c.PrevTxs)
-	if err != nil {
-		return nil, err
+	coinsMap, redeemScripts, rpcErr := getCoins(mergedTx.GetIns(), c.PrevTxs)
+	if rpcErr != nil {
+		return nil, rpcErr
 	}
 
-	priKeys := make([]*crypto.PrivateKey, 0)
-	if c.PrivKeys != nil {
-		for _, key := range *c.PrivKeys {
-			priKey, err := crypto.DecodePrivateKey(key)
-			if err != nil {
-				return nil, btcjson.RPCError{
-					Code:    btcjson.RPCInvalidAddressOrKey,
-					Message: "Invalid private key",
-				}
-			}
-			priKeys = append(priKeys, priKey)
-		}
+	keyStore, rpcErr := getKeys(c.PrivKeys, coinsMap, redeemScripts)
+	if rpcErr != nil {
+		return nil, rpcErr
 	}
 
 	hashType := crypto.SigHashAll | crypto.SigHashForkID
 	if c.SigHashType != nil {
 		var ok bool
 		if hashType, ok = mapSigHashValues[*c.SigHashType]; !ok {
-			return nil, btcjson.RPCError{
-				Code:    btcjson.ErrRPCInvalidParameter,
-				Message: "Invalid sighash param",
-			}
+			return nil, btcjson.NewRPCError(btcjson.ErrRPCInvalidParameter, "Invalid sighash param")
 		}
 		if hashType&crypto.SigHashForkID == 0 {
-			return nil, btcjson.RPCError{
-				Code:    btcjson.ErrRPCInvalidParameter,
-				Message: "Signature must use SIGHASH_FORKID",
-			}
+			return nil, btcjson.NewRPCError(btcjson.ErrRPCInvalidParameter, "Signature must use SIGHASH_FORKID")
 		}
 	}
 
-	hashSingle := hashType & ^(crypto.SigHashAnyoneCanpay|crypto.SigHashForkID) == crypto.SigHashSingle
-
-	errors := make([]*btcjson.SignRawTransactionError, 0)
-	for index, in := range mergedTx.GetIns() {
-		coin := coinsMap.GetCoin(in.PreviousOutPoint)
-		if coin == nil || isCoinSpent(coin, in.PreviousOutPoint) {
-			errors = append(errors, TxInErrorToJSON(in, "Input not found or already spent"))
-			continue
-		}
-
-		scriptPubKey := coin.GetScriptPubKey()
-		scriptSig := script.NewEmptyScript()
-
-		// Only sign SIGHASH_SINGLE if there's a corresponding output
-		if !hashSingle || index < mergedTx.GetOutsCount() {
-			redeemScript := redeemScripts[*in.PreviousOutPoint]
-			// Sign what we can
-			scriptSig, err = produceScriptSig(mergedTx, index, scriptPubKey, priKeys,
-				uint32(hashType), coin.GetAmount(), redeemScript)
-			if err != nil {
-				log.Info("produceScriptSig error:%s", err.Error())
-			}
-		}
-
-		// ... and merge in other signatures
-		for _, transaction := range txVariants {
-			if len(transaction.GetIns()) > index {
-				scriptSig, err = ltx.CombineSignature(transaction, scriptPubKey, scriptSig,
-					transaction.GetIns()[index].GetScriptSig(), index, coin.GetAmount(),
-					uint32(script.StandardScriptVerifyFlags), lscript.NewScriptRealChecker())
-				if err != nil {
-					log.Info("CombineSignature error:%s", err.Error())
-				}
-			}
-		}
-
-		err = mergedTx.UpdateInScript(index, scriptSig)
-		if err != nil {
-			log.Info("UpdateInScript error:%s", err.Error())
-		}
-
-		err = lscript.VerifyScript(mergedTx, scriptSig, scriptPubKey, index, coin.GetAmount(),
-			uint32(script.StandardScriptVerifyFlags), lscript.NewScriptRealChecker())
-		if err != nil {
-			errors = append(errors, TxInErrorToJSON(in, err.Error()))
-			continue
-		}
+	signErrors := ltx.SignRawTransaction(txVariants, redeemScripts, keyStore, coinsMap, uint32(hashType))
+	errors := make([]*btcjson.SignRawTransactionError, 0, len(signErrors))
+	for _, signErr := range signErrors {
+		errors = append(errors, TxInErrorToJSON(signErr.TxIn, signErr.ErrMsg))
 	}
 
 	complete := len(errors) == 0
@@ -736,7 +680,7 @@ func handleSignRawTransaction(s *Server, cmd interface{}, closeChan <-chan struc
 	err = mergedTx.Serialize(buf)
 	if err != nil {
 		log.Error("rawTransaction:serialize transaction failed: %v", err)
-		return nil, err
+		return nil, btcjson.ErrRPCInternal
 	}
 	return &btcjson.SignRawTransactionResult{
 		Hex:      hex.EncodeToString(buf.Bytes()),
@@ -746,7 +690,7 @@ func handleSignRawTransaction(s *Server, cmd interface{}, closeChan <-chan struc
 }
 
 func getCoins(txIns []*txin.TxIn, prevTxs *[]btcjson.RawTxInput) (*utxo.CoinsMap,
-	map[outpoint.OutPoint]*script.Script, error) {
+	map[outpoint.OutPoint]*script.Script, *btcjson.RPCError) {
 	coinsMap := utxo.NewEmptyCoinsMap()
 	for _, in := range txIns {
 		// fetch from mempool
@@ -771,10 +715,7 @@ func getCoins(txIns []*txin.TxIn, prevTxs *[]btcjson.RawTxInput) (*utxo.CoinsMap
 			return nil, nil, rpcDecodeHexError(prevTx.Txid)
 		}
 		if prevTx.Vout < 0 {
-			return nil, nil, btcjson.RPCError{
-				Code:    btcjson.RPCDeserializationError,
-				Message: "vout must be positive",
-			}
+			return nil, nil, btcjson.NewRPCError(btcjson.RPCDeserializationError, "vout must be positive")
 		}
 		out := outpoint.NewOutPoint(*hash, prevTx.Vout)
 
@@ -786,19 +727,17 @@ func getCoins(txIns []*txin.TxIn, prevTxs *[]btcjson.RawTxInput) (*utxo.CoinsMap
 
 		coin := coinsMap.GetCoin(out)
 		if coin != nil && !isCoinSpent(coin, out) && !coin.GetScriptPubKey().IsEqual(scriptPubKey) {
-			return nil, nil, btcjson.RPCError{
-				Code: btcjson.RPCDeserializationError,
-				Message: "Previous output scriptPubKey mismatch:\n" +
-					ScriptToAsmStr(coin.GetScriptPubKey(), false) +
-					"\nvs:\n" + ScriptToAsmStr(scriptPubKey, false),
-			}
+			coinPrevScript := ScriptToAsmStr(coin.GetScriptPubKey(), false)
+			inputPrevScript := ScriptToAsmStr(scriptPubKey, false)
+			return nil, nil, btcjson.NewRPCError(btcjson.RPCDeserializationError,
+				"Previous output scriptPubKey mismatch:\n"+coinPrevScript+"\nvs:\n"+inputPrevScript)
 		}
-		outAmount, err := amountFromValue(prevTx.Amount)
-		if err != nil {
-			return nil, nil, err
+		outAmount, rpcErr := amountFromValue(prevTx.Amount)
+		if rpcErr != nil {
+			return nil, nil, rpcErr
 		}
 		txOut := txout.NewTxOut(outAmount, scriptPubKey)
-		coin = utxo.NewCoin(txOut, 1, false)
+		coin = utxo.NewFreshCoin(txOut, 1, false)
 		coinsMap.AddCoin(out, coin, true)
 
 		if prevTx.RedeemScript != nil {
@@ -807,137 +746,64 @@ func getCoins(txIns []*txin.TxIn, prevTxs *[]btcjson.RawTxInput) (*utxo.CoinsMap
 				return nil, nil, rpcDecodeHexError(*prevTx.RedeemScript)
 			}
 			redeemScripts[*out] = script.NewScriptRaw(redeemScriptData)
+		} else {
+			if scriptPubKey.Size() == 23 {
+				keyHash := scriptPubKey.GetData()[2:22]
+				if redeem := wallet.GetInstance().GetScript(keyHash); redeem != nil {
+					redeemScripts[*out] = redeem
+				}
+			}
 		}
 	}
 	return coinsMap, redeemScripts, nil
 }
 
-func findPrivateKey(privateKeys []*crypto.PrivateKey, pubKey *[]byte) *crypto.PrivateKey {
-	for _, privateKey := range privateKeys {
-		if bytes.Equal(privateKey.PubKey().ToBytes(), *pubKey) {
-			return privateKey
-		}
-	}
-	return nil
-}
+func getPubKeyHash(scriptPubKey *script.Script) [][]byte {
+	pubKeyHash := make([][]byte, 0)
+	pubKeyType, pubKeys, _ := scriptPubKey.IsStandardScriptPubKey()
 
-func findPrivateKeyByHash(privateKeys []*crypto.PrivateKey, pubKeyHash *[]byte) *crypto.PrivateKey {
-	for _, privateKey := range privateKeys {
-		keyHash := util.Hash160(privateKey.PubKey().ToBytes())
-		if bytes.Equal(keyHash, *pubKeyHash) {
-			return privateKey
-		}
-	}
-	return nil
-}
-
-func produceScriptSig(transaction *tx.Tx, nIn int, scriptPubKey *script.Script, privateKeys []*crypto.PrivateKey,
-	hashType uint32, value amount.Amount, scriptRedeem *script.Script) (*script.Script, error) {
-
-	sigScriptPubKey := scriptPubKey
-	pubKeyType, pubKeys, isStandard := scriptPubKey.IsStandardScriptPubKey()
-	if !isStandard {
-		return nil, errcode.New(errcode.RejectNonstandard)
-	}
-	if pubKeyType == script.ScriptHash {
-		if scriptRedeem == nil {
-			return nil, errors.New("Redeem script not found")
-		}
-		sigScriptPubKey = scriptRedeem
-		pubKeyType, pubKeys, isStandard = scriptRedeem.IsStandardScriptPubKey()
-		if !isStandard {
-			return nil, errcode.New(errcode.RejectNonstandard)
-		}
-	}
-
-	scriptSigData := make([][]byte, 0)
 	if pubKeyType == script.ScriptPubkey {
-		privateKey := findPrivateKey(privateKeys, &pubKeys[0])
-		if privateKey == nil {
-			return nil, errors.New("Private key not found")
-		}
-		sigData, err := getSignatureData(transaction, nIn, sigScriptPubKey, privateKey, hashType, value)
-		if err != nil {
-			return nil, err
-		}
-		// <signature>
-		scriptSigData = append(scriptSigData, sigData)
+		pubKeyHash = append(pubKeyHash, util.Hash160(pubKeys[0]))
+
 	} else if pubKeyType == script.ScriptPubkeyHash {
-		privateKey := findPrivateKeyByHash(privateKeys, &pubKeys[0])
-		if privateKey == nil {
-			return nil, errors.New("Private key not found")
-		}
-		sigData, err := getSignatureData(transaction, nIn, sigScriptPubKey, privateKey, hashType, value)
-		if err != nil {
-			return nil, err
-		}
-		pubKeyBuf := privateKey.PubKey().ToBytes()
-		// <signature> <pubkey>
-		scriptSigData = append(scriptSigData, sigData, pubKeyBuf)
+		pubKeyHash = append(pubKeyHash, pubKeys[0])
+
 	} else if pubKeyType == script.ScriptMultiSig {
-		required := int(pubKeys[0][0])
-		signed := 0
-		// <OP_0> <signature0> ... <signatureM>
-		sigData := []byte{0}
-		scriptSigData = append(scriptSigData, sigData)
 		for _, pubKey := range pubKeys[1:] {
-			privateKey := findPrivateKey(privateKeys, &pubKey)
-			if privateKey == nil {
-				log.Info("Private key not found:%s", hex.EncodeToString(pubKey))
-				continue
-			}
-			sigData, err := getSignatureData(transaction, nIn, sigScriptPubKey, privateKey, hashType, value)
-			if err != nil {
-				log.Info("getSignatureData error:%s", err.Error())
-				continue
-			}
-			scriptSigData = append(scriptSigData, sigData)
-			signed++
-			if signed == required {
-				break
+			if len(pubKey) >= 32 {
+				pubKeyHash = append(pubKeyHash, util.Hash160(pubKey))
 			}
 		}
-		if signed != required {
-			errmsg := fmt.Sprintf("ScriptMultiSig signed(%d) does not match required(%d)", signed, required)
-			return nil, errors.New(errmsg)
-		}
-	} else {
-		return nil, errors.New("unexpected script type")
 	}
-
-	if sigScriptPubKey == scriptRedeem {
-		// <signature> <redeemscript>
-		scriptSigData = append(scriptSigData, scriptRedeem.GetData())
-	}
-
-	scriptSig := script.NewEmptyScript()
-	scriptSig.PushMultData(scriptSigData)
-	err := lscript.VerifyScript(transaction, scriptSig, scriptPubKey, nIn, value,
-		uint32(script.StandardScriptVerifyFlags), lscript.NewScriptRealChecker())
-	if err != nil {
-		return nil, err
-	}
-
-	return scriptSig, nil
+	return pubKeyHash
 }
 
-func getSignatureData(transaction *tx.Tx, nIn int, scriptPubKey *script.Script, privateKey *crypto.PrivateKey,
-	hashType uint32, value amount.Amount) ([]byte, error) {
+func getKeys(privateKeys *[]string, coinsMap *utxo.CoinsMap,
+	redeemScripts map[outpoint.OutPoint]*script.Script) (*crypto.KeyStore, *btcjson.RPCError) {
 
-	txSigHash, err := tx.SignatureHash(transaction, scriptPubKey, hashType, nIn,
-		value, script.ScriptEnableSigHashForkID)
-	if err != nil {
-		return nil, err
+	keyStore := crypto.NewKeyStore()
+	if privateKeys != nil {
+		for _, key := range *privateKeys {
+			privateKey, err := crypto.DecodePrivateKey(key)
+			if err != nil {
+				return nil, btcjson.NewRPCError(btcjson.RPCInvalidAddressOrKey, "Invalid private key")
+			}
+			keyStore.AddKey(privateKey)
+		}
+	} else if lwallet.IsWalletEnable() {
+		pubKeyHashList := make([][]byte, 0)
+		for _, coin := range coinsMap.GetMap() {
+			pubKeyHash := getPubKeyHash(coin.GetScriptPubKey())
+			pubKeyHashList = append(pubKeyHashList, pubKeyHash...)
+		}
+		for _, redeemScript := range redeemScripts {
+			pubKeyHash := getPubKeyHash(redeemScript)
+			pubKeyHashList = append(pubKeyHashList, pubKeyHash...)
+		}
+		keyPairs := lwallet.GetKeyPairs(pubKeyHashList)
+		keyStore.AddKeyPairs(keyPairs)
 	}
-
-	signature, err := privateKey.Sign(txSigHash[:])
-	if err != nil {
-		return nil, err
-	}
-
-	sigBuf := signature.Serialize()
-	sigBuf = append(sigBuf, byte(hashType))
-	return sigBuf, nil
+	return keyStore, nil
 }
 
 func TxInErrorToJSON(in *txin.TxIn, errorMessage string) *btcjson.SignRawTransactionError {
@@ -960,16 +826,12 @@ func handleGetTxoutProof(s *Server, cmd interface{}, closeChan <-chan struct{}) 
 	for _, txID := range txIds {
 		hash, err := util.GetHashFromStr(txID)
 		if len(txID) != 64 || err != nil {
-			return nil, &btcjson.RPCError{
-				Code:    btcjson.ErrRPCInvalidParameter,
-				Message: "Invalid txid " + txID,
-			}
+			return nil, btcjson.NewRPCError(btcjson.ErrRPCInvalidParameter,
+				"Invalid txid "+txID)
 		}
 		if setTxIds.Has(*hash) {
-			return nil, &btcjson.RPCError{
-				Code:    btcjson.ErrRPCInvalidParameter,
-				Message: "Invalid parameter, duplicated txid: " + txID,
-			}
+			return nil, btcjson.NewRPCError(btcjson.ErrRPCInvalidParameter,
+				"Invalid parameter, duplicated txid: "+txID)
 		}
 		setTxIds.Add(*hash)
 		oneTxID = *hash
@@ -986,10 +848,7 @@ func handleGetTxoutProof(s *Server, cmd interface{}, closeChan <-chan struct{}) 
 
 		bindex = chain.GetInstance().FindBlockIndex(*hashBlock)
 		if bindex == nil {
-			return nil, btcjson.RPCError{
-				Code:    btcjson.RPCInvalidAddressOrKey,
-				Message: "Block not found",
-			}
+			return nil, btcjson.NewRPCError(btcjson.RPCInvalidAddressOrKey, "Block not found")
 		}
 	} else {
 		view := utxo.GetUtxoCacheInstance()
@@ -1002,27 +861,18 @@ func handleGetTxoutProof(s *Server, cmd interface{}, closeChan <-chan struct{}) 
 		if bindex == nil {
 			_, hashBlock, ok := GetTransaction(&oneTxID, false)
 			if !ok || hashBlock == nil {
-				return nil, btcjson.RPCError{
-					Code:    btcjson.RPCInvalidAddressOrKey,
-					Message: "Transaction not yet in block",
-				}
+				return nil, btcjson.NewRPCError(btcjson.RPCInvalidAddressOrKey, "Transaction not yet in block")
 			}
 			bindex = chain.GetInstance().FindBlockIndex(*hashBlock)
 			if bindex == nil {
-				return nil, btcjson.RPCError{
-					Code:    btcjson.RPCInternalError,
-					Message: "Transaction index corrupt",
-				}
+				return nil, btcjson.NewRPCError(btcjson.RPCInternalError, "Transaction index corrupt")
 			}
 		}
 	}
 
 	bk, ok := disk.ReadBlockFromDisk(bindex, chain.GetInstance().GetParams())
 	if !ok {
-		return nil, btcjson.RPCError{
-			Code:    btcjson.RPCInternalError,
-			Message: "Can not read block from disk",
-		}
+		return nil, btcjson.NewRPCError(btcjson.RPCInternalError, "Can not read block from disk")
 	}
 
 	found := 0
@@ -1033,10 +883,8 @@ func handleGetTxoutProof(s *Server, cmd interface{}, closeChan <-chan struct{}) 
 	}
 
 	if found != setTxIds.Size() {
-		return nil, btcjson.RPCError{
-			Code:    btcjson.RPCInvalidAddressOrKey,
-			Message: "(Not all) transactions not found in specified block",
-		}
+		return nil, btcjson.NewRPCError(btcjson.RPCInvalidAddressOrKey,
+			"(Not all) transactions not found in specified block")
 	}
 
 	mb := lmerkleblock.NewMerkleBlock(bk, setTxIds)
@@ -1046,7 +894,7 @@ func handleGetTxoutProof(s *Server, cmd interface{}, closeChan <-chan struct{}) 
 }
 
 func handleVerifyTxoutProof(s *Server, cmd interface{}, closeChan <-chan struct{}) (interface{}, error) {
-	c := cmd.(*btcjson.VerifyTxoutProofCmd)
+	c := cmd.(*btcjson.VerifyTxOutProofCmd)
 
 	b, err := hex.DecodeString(c.Proof)
 	if err != nil {
@@ -1056,10 +904,7 @@ func handleVerifyTxoutProof(s *Server, cmd interface{}, closeChan <-chan struct{
 	mb := &lmerkleblock.MerkleBlock{}
 	err = mb.Unserialize(bytes.NewReader(b))
 	if err != nil {
-		return nil, btcjson.RPCError{
-			Code:    btcjson.RPCDeserializationError,
-			Message: "MerkleBlock Unserialize error",
-		}
+		return nil, btcjson.NewRPCError(btcjson.RPCDeserializationError, "MerkleBlock Unserialize error")
 	}
 
 	matches := make([]util.Hash, 0)
@@ -1070,10 +915,7 @@ func handleVerifyTxoutProof(s *Server, cmd interface{}, closeChan <-chan struct{
 
 	bindex := chain.GetInstance().FindBlockIndex(mb.Header.GetHash())
 	if bindex == nil || !chain.GetInstance().Contains(bindex) {
-		return nil, btcjson.RPCError{
-			Code:    btcjson.RPCInvalidAddressOrKey,
-			Message: "Block not found in chain",
-		}
+		return nil, btcjson.NewRPCError(btcjson.RPCInvalidAddressOrKey, "Block not found in chain")
 	}
 
 	ret := make([]string, 0, len(matches))
@@ -1083,7 +925,7 @@ func handleVerifyTxoutProof(s *Server, cmd interface{}, closeChan <-chan struct{
 	return ret, nil
 }
 
-func registeRawTransactionRPCCommands() {
+func registerRawTransactionRPCCommands() {
 	for name, handler := range rawTransactionHandlers {
 		appendCommand(name, handler)
 	}

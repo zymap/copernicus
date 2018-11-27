@@ -10,7 +10,7 @@ RPC:
 
 Log:
   FileName: copernicus
-  Level: debug
+  Level: error
   Module: [mempool,utxo,bench,service]
 
 Mempool:
@@ -30,8 +30,8 @@ Chain:
 
 P2PNet:
   ListenAddrs: [127.0.0.1:18333]
-  MaxPeers: 5
-  TargetOutbound: 3
+  MaxPeers:
+  TargetOutbound:
   ConnectPeersOnStart:
   DisableBanning: true
   SimNet: false
@@ -43,7 +43,7 @@ P2PNet:
   DisableTLS: false
   UserAgentComments:
 
-Protocal:
+Protocol:
   NoPeerBloomFilters: true
   DisableCheckpoints: true
 

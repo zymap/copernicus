@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"github.com/copernet/copernicus/conf"
 	"math/rand"
 	"time"
 )
@@ -26,10 +27,12 @@ func registerAllRPCCommands() {
 	registerMiningRPCCommands()
 	registerMiscRPCCommands()
 	registerNetRPCCommands()
-	registeRawTransactionRPCCommands()
+	registerRawTransactionRPCCommands()
+	if conf.Cfg.Wallet.Enable {
+		registerWalletRPCCommands()
+	}
 }
 
 func init() {
-	registerAllRPCCommands()
 	rand.Seed(time.Now().UnixNano())
 }

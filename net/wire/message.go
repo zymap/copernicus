@@ -7,6 +7,7 @@ package wire
 import (
 	"bytes"
 	"fmt"
+	"github.com/copernet/copernicus/conf"
 	"io"
 	"unicode/utf8"
 
@@ -26,6 +27,10 @@ const CommandSize = 12
 // MaxMessagePayload is the maximum bytes a message can be regardless of other
 // individual limits imposed by messages themselves.
 const MaxMessagePayload = (1024 * 1024 * 32) // 32MB
+
+// MaxProtocolMessageLength length of incoming protocol messages (Currently 2MB).
+// NB: Messages propagating block content are not subject to this limit.
+const MaxProtocolMessageLength = 2 * 1024 * 1024
 
 // Commands used in bitcoin message headers which describe the type of message.
 const (
@@ -65,11 +70,6 @@ const (
 	// BaseEncoding encodes all messages in the default format specified
 	// for the Bitcoin wire protocol.
 	BaseEncoding MessageEncoding = 1 << iota
-
-	// WitnessEncoding encodes all messages other than transaction messages
-	// using the default Bitcoin wire protocol specification. For transaction
-	// messages, the new encoding format detailed in BIP0144 will be used.
-	WitnessEncoding
 )
 
 // LatestEncoding is the most recently specified encoding for the Bitcoin wire
@@ -160,19 +160,20 @@ func makeEmptyMessage(command string) (Message, error) {
 
 	case CmdFeeFilter:
 		msg = &MsgFeeFilter{}
+		/*
+			case CmdSendCmpct:
+				msg = &MsgSendCmpct{}
 
-	case CmdSendCmpct:
-		msg = &MsgSendCmpct{}
+			case CmdCmpctBlock:
+				msg = &MsgCmpctBlock{}
 
-	case CmdCmpctBlock:
-		msg = &MsgCmpctBlock{}
+			case CmdGetBlockTxn:
+				msg = &MsgGetBlockTxn{}
 
-	case CmdGetBlockTxn:
-		msg = &MsgGetBlockTxn{}
+			case CmdBlockTxn:
+				msg = &MsgBlockTxn{}
 
-	case CmdBlockTxn:
-		msg = &MsgBlockTxn{}
-
+		*/
 	default:
 		return nil, fmt.Errorf("unhandled command [%s]", command)
 	}
@@ -320,6 +321,18 @@ func WriteMessageWithEncodingN(w io.Writer, msg Message, pver uint32,
 	return totalBytes, err
 }
 
+func isBlockLike(cmd string) bool {
+	return cmd == CmdBlock || cmd == CmdCmpctBlock || cmd == CmdBlockTxn
+}
+
+func isOverSized(msgSize uint32, cmd string) bool {
+	if msgSize > MaxProtocolMessageLength && !isBlockLike(cmd) {
+		return true
+	}
+
+	return uint64(msgSize) > 2*conf.Cfg.Excessiveblocksize
+}
+
 // ReadMessageWithEncodingN reads, validates, and parses the next bitcoin Message
 // from r for the provided protocol version and bitcoin network.  It returns the
 // number of bytes read in addition to the parsed Message and raw bytes which
@@ -341,12 +354,11 @@ func ReadMessageWithEncodingN(r io.Reader, pver uint32, btcnet BitcoinNet,
 	}
 
 	// Enforce maximum message payload.
-	if hdr.length > MaxMessagePayload {
-		str := fmt.Sprintf("message payload is too large - header "+
-			"indicates %d bytes, but max message payload is %d "+
-			"bytes.", hdr.length, MaxMessagePayload)
+	if isOverSized(hdr.length, hdr.command) {
+		str := fmt.Sprintf("message payload is too large - header indicates %d bytes,"+
+			"but max message payload is %d bytes. max block msg len: %d",
+			hdr.length, MaxProtocolMessageLength, 2*conf.Cfg.Excessiveblocksize)
 		return totalBytes, nil, nil, messageError("ReadMessage", str)
-
 	}
 
 	// Check for messages from the wrong bitcoin network.
@@ -376,7 +388,7 @@ func ReadMessageWithEncodingN(r io.Reader, pver uint32, btcnet BitcoinNet,
 	// could otherwise create a well-formed header and set the length to max
 	// numbers in order to exhaust the machine's memory.
 	mpl := msg.MaxPayloadLength(pver)
-	if uint64(hdr.length) > mpl {
+	if uint64(hdr.length) > mpl*2 {
 		discardInput(r, hdr.length)
 		str := fmt.Sprintf("payload exceeds max length - header "+
 			"indicates %v bytes, but max payload size for "+
@@ -409,7 +421,7 @@ func ReadMessageWithEncodingN(r io.Reader, pver uint32, btcnet BitcoinNet,
 	err = msg.Decode(pr, pver, enc)
 	if err != nil {
 		log.Error("decode error: %v", err)
-		return totalBytes, nil, nil, err
+		return totalBytes, nil, nil, messageError("Decode msg", err.Error())
 	}
 
 	return totalBytes, msg, payload, nil

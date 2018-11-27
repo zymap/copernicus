@@ -35,6 +35,15 @@ const (
 	MaxScriptElementSize = 520
 	MaxScriptOpCodes     = 201
 	MaxOpsPerScript      = 201
+
+	// MaxTxInStandardScriptSigSize is
+	// Biggest 'standard' txin is a 15-of-15 P2SH multisig with compressed
+	// keys (remember the 520 byte limit on redeemScript size). That works
+	// out to a (15*(33+1))+3=513 byte redeemScript, 513+1+15*(73+1)+3=1627
+	// bytes of scriptSig, which we round off to 1650 bytes for some minor
+	// future-proofing. That's also enough to spend a 20-of-20 CHECKMULTISIG
+	// scriptPubKey, though such a scriptPubKey is not considered standard.
+	MaxTxInStandardScriptSigSize = 1650
 )
 
 const (
@@ -130,10 +139,6 @@ const (
 	// See BIP112 for details
 	ScriptVerifyCheckSequenceVerify = (1 << 10)
 
-	// Making v1-v16 witness program non-standard
-	//
-	ScriptVerifyDiscourageUpgradableWitnessProgram = (1 << 12)
-
 	// Segwit script only: Require the argument of OP_IF/NOTIF to be exactly
 	// 0x01 or empty vector
 	//
@@ -155,12 +160,9 @@ const (
 	//
 	ScriptEnableReplayProtection = (1 << 17)
 
-	// Enable new opcodes.
-	//
-	ScriptEnableMonolithOpcodes = (1 << 18)
 	// Is OP_CHECKDATASIG and variant are enabled.
 	//
-	//ScriptEnableCheckDataSig = (1 << 18)
+	ScriptEnableCheckDataSig = (1 << 18)
 
 	ScriptMaxOpReturnRelay uint = 223
 )
@@ -180,24 +182,28 @@ const (
 	// them to be valid. (but old blocks may not comply with) Currently just P2SH,
 	// but in the future other flags may be added, such as a soft-fork to enforce
 	// strict DER encoding.
-	//
-	// Failing one of these tests may trigger a DoS ban - see CheckInputs() for
+
+	// MandatoryScriptVerifyFlags failing one of these tests may trigger a DoS ban - see CheckInputs() for
 	// details.
-	MandatoryScriptVerifyFlags uint = ScriptVerifyP2SH | ScriptVerifyStrictEnc | ScriptEnableSigHashForkID
+	MandatoryScriptVerifyFlags uint = ScriptVerifyP2SH | ScriptVerifyStrictEnc | ScriptEnableSigHashForkID |
+		ScriptVerifyLowS | ScriptVerifyNullFail
 
-	/*StandardScriptVerifyFlags standard script verification flags that standard transactions will comply
-	 * with. However scripts violating these flags may still be present in valid
-	 * blocks and we must accept those blocks.
-	 */
-	StandardScriptVerifyFlags uint = MandatoryScriptVerifyFlags | ScriptVerifyDersig |
-		ScriptVerifyMinmalData | ScriptVerifyNullDummy |
-		ScriptVerifyDiscourageUpgradableNops | ScriptVerifyCleanStack |
-		ScriptVerifyNullFail | ScriptVerifyCheckLockTimeVerify |
-		ScriptVerifyCheckSequenceVerify | ScriptVerifyLowS |
-		ScriptVerifyDiscourageUpgradableWitnessProgram
+	//StandardScriptVerifyFlags standard script verification flags that standard transactions will comply
+	// with. However scripts violating these flags may still be present in valid
+	// blocks and we must accept those blocks.
+	StandardScriptVerifyFlags uint = MandatoryScriptVerifyFlags | ScriptVerifyDersig | ScriptVerifyLowS |
+		ScriptVerifyNullDummy | ScriptVerifySigPushOnly |
+		ScriptVerifyMinmalData | ScriptVerifyDiscourageUpgradableNops |
+		ScriptVerifyCleanStack | ScriptVerifyCheckLockTimeVerify |
+		ScriptVerifyCheckSequenceVerify | ScriptVerifyNullFail
 
-	/*StandardNotMandatoryVerifyFlags for convenience, standard but not mandatory verify flags. */
+	//StandardNotMandatoryVerifyFlags for convenience, standard but not mandatory verify flags.
 	StandardNotMandatoryVerifyFlags uint = StandardScriptVerifyFlags & (^MandatoryScriptVerifyFlags)
+
+	//StandardCheckDataSigVerifyFlags used as the flags parameters to check for sigops as if OP_CHECKDATASIG is
+	//enabled. Can be removed after OP_CHECKDATASIG is activated as the flag is
+	//made standard.
+	StandardCheckDataSigVerifyFlags = StandardScriptVerifyFlags | ScriptEnableCheckDataSig
 )
 
 type Script struct {
@@ -385,7 +391,7 @@ func (s *Script) RemoveOpCodeByIndex(index int) *Script {
 		return NewScriptOps(s.ParsedOpCodes[:index])
 	}
 	parsedOpCodes := make([]opcodes.ParsedOpCode, 0, opCodesLen-1)
-	parsedOpCodes = append(parsedOpCodes, s.ParsedOpCodes[:index-1]...)
+	parsedOpCodes = append(parsedOpCodes, s.ParsedOpCodes[:index]...)
 	parsedOpCodes = append(parsedOpCodes, s.ParsedOpCodes[index+1:]...)
 	return NewScriptOps(parsedOpCodes)
 }
@@ -460,7 +466,7 @@ func (s *Script) ExtractDestinations() (sType int, addresses []*Address, sigCoun
 	if sType == ScriptMultiSig {
 		sigCountRequired = int(pubKeys[0][0])
 		addresses = make([]*Address, 0, len(pubKeys)-2)
-		for _, e := range pubKeys[1 : len(pubKeys)-2] {
+		for _, e := range pubKeys[1 : len(pubKeys)-1] {
 			address, err := AddressFromPublicKey(e)
 			if err != nil {
 				return sType, nil, 0, err
@@ -508,14 +514,21 @@ func BytesToBool(bytes []byte) bool {
 
 func (s *Script) IsStandardScriptPubKey() (pubKeyType int, pubKeys [][]byte, isStandard bool) {
 	//p2sh scriptPubKey
+
+	// Shortcut for pay-to-script-hash, which are more constrained than the
+	// other types:
+	// it is always OP_HASH160 20 [20 byte hash] OP_EQUAL
 	if s.IsPayToScriptHash() {
 		return ScriptHash, [][]byte{s.ParsedOpCodes[1].Data}, true
 	}
+
 	// Provably prunable, data-carrying output
 	//
 	// So long as script passes the IsUnspendable() test and all but the first
 	// byte passes the IsPushOnly() test we don't care what exactly is in the
 	// script.
+
+	// OP_RETURN or OP_RETURN + DATA
 	opCodesLen := len(s.ParsedOpCodes)
 	if opCodesLen == 0 {
 		return ScriptNonStandard, nil, false
@@ -523,24 +536,16 @@ func (s *Script) IsStandardScriptPubKey() (pubKeyType int, pubKeys [][]byte, isS
 	parsedOpCode0 := s.ParsedOpCodes[0]
 	opValue0 := parsedOpCode0.OpValue
 
-	// OP_RETURN
-	if opCodesLen == 1 {
-		if parsedOpCode0.OpValue == opcodes.OP_RETURN {
+	if opCodesLen >= 1 && parsedOpCode0.OpValue == opcodes.OP_RETURN {
+		temp := NewScriptOps(s.ParsedOpCodes[1:])
+		if temp.IsPushOnly() {
 			return ScriptNullData, nil, true
 		}
 		return ScriptNonStandard, nil, false
 	}
 
-	// OP_RETURN and DATA
-	if parsedOpCode0.OpValue == opcodes.OP_RETURN {
-		tempScript := NewScriptOps(s.ParsedOpCodes[1:])
-		if tempScript.IsPushOnly() {
-			return ScriptNullData, nil, true
-		}
-		return ScriptNonStandard, nil, false
-	}
-
-	//PUBKEY OP_CHECKSIG
+	// Standard tx, sender provides pubkkey, receiver adds signature.
+	// PUBKEY << OP_CHECKSIG
 	if opCodesLen == 2 {
 		if opValue0 > opcodes.OP_PUSHDATA4 || parsedOpCode0.Length < 33 ||
 			parsedOpCode0.Length > 65 || s.ParsedOpCodes[1].OpValue != opcodes.OP_CHECKSIG {
@@ -554,7 +559,8 @@ func (s *Script) IsStandardScriptPubKey() (pubKeyType int, pubKeys [][]byte, isS
 		return
 	}
 
-	//OP_DUP OP_HASH160 PUBKEYHASH OP_EQUALVERIFY OP_CHECKSIG
+	// Bitcoin address tx, sender provides hash of pubkey, reciver provides signature and pubkey.
+	// OP_DUP << OP_HASH160 << PUBKEYHASH << OP_EQUALVERIFY << OP_CHECKSIG
 	if opValue0 == opcodes.OP_DUP {
 		if opCodesLen != 5 {
 			return ScriptNonStandard, nil, false
@@ -574,6 +580,7 @@ func (s *Script) IsStandardScriptPubKey() (pubKeyType int, pubKeys [][]byte, isS
 		return
 	}
 
+	// Sender provides N pubkeys, receivers provides M signaures.
 	//m pubkey1 pubkey2...pubkeyn n OP_CHECKMULTISIG
 	if opValue0 == opcodes.OP_0 || (opValue0 >= opcodes.OP_1 && opValue0 <= opcodes.OP_16) {
 		if opCodesLen < 4 {
@@ -618,13 +625,7 @@ func (s *Script) IsStandardScriptPubKey() (pubKeyType int, pubKeys [][]byte, isS
 }
 
 func (s *Script) CheckScriptSigStandard() (bool, string) {
-	// Biggest 'standard' txin is a 15-of-15 P2SH multisig with compressed
-	// keys (remember the 520 byte limit on redeemScript size). That works
-	// out to a (15*(33+1))+3=513 byte redeemScript, 513+1+15*(73+1)+3=1627
-	// bytes of scriptSig, which we round off to 1650 bytes for some minor
-	// future-proofing. That's also enough to spend a 20-of-20 CHECKMULTISIG
-	// scriptPubKey, though such a scriptPubKey is not considered standard.
-	if s.Size() > 1650 {
+	if s.Size() > MaxTxInStandardScriptSigSize {
 		return false, "scriptsig-size"
 	}
 	if !s.IsPushOnly() {
@@ -659,18 +660,26 @@ func (s *Script) IsPushOnly() bool {
 
 }
 
-func (s *Script) GetSigOpCount(accurate bool) int {
+func (s *Script) GetSigOpCount(flags uint32, accurate bool) int {
 	n := 0
 	var lastOpcode byte
 	for _, e := range s.ParsedOpCodes {
 		opcode := e.OpValue
-		if opcode == opcodes.OP_CHECKSIG || opcode == opcodes.OP_CHECKSIGVERIFY {
+
+		switch opcode {
+		case opcodes.OP_CHECKSIG:
+			fallthrough
+		case opcodes.OP_CHECKSIGVERIFY:
 			n++
-			//} else if opcode == opcodes.OP_CHECKDATASIG || opcode == opcodes.OP_CHECKDATASIGVERIFY {
-			//	if flags&ScriptEnableCheckDataSig == ScriptEnableCheckDataSig {
-			//		n++
-			//	}
-		} else if opcode == opcodes.OP_CHECKMULTISIG || opcode == opcodes.OP_CHECKMULTISIGVERIFY {
+		case opcodes.OP_CHECKDATASIG:
+			fallthrough
+		case opcodes.OP_CHECKDATASIGVERIFY:
+			if flags&ScriptEnableCheckDataSig != 0 {
+				n++
+			}
+		case opcodes.OP_CHECKMULTISIG:
+			fallthrough
+		case opcodes.OP_CHECKMULTISIGVERIFY:
 			if accurate && lastOpcode >= opcodes.OP_1 && lastOpcode <= opcodes.OP_16 {
 				n += DecodeOPN(lastOpcode)
 			} else {
@@ -682,24 +691,27 @@ func (s *Script) GetSigOpCount(accurate bool) int {
 	return n
 }
 
-func (s *Script) GetP2SHSigOpCount() int {
+func (s *Script) GetPubKeyP2SHSigOpCount(flags uint32, scriptSig *Script) int {
+	if flags&ScriptVerifyP2SH == 0 || !s.IsPayToScriptHash() {
+		return s.GetSigOpCount(flags, true)
+	}
+
+	if scriptSig.badOpCode {
+		return 0
+	}
+
 	// This is a pay-to-script-hash scriptPubKey;
 	// get the last item that the scriptSig
 	// pushes onto the stack:
-	if s.badOpCode {
-		return 0
-	}
-	for _, e := range s.ParsedOpCodes {
-		opcode := e.OpValue
-		if opcode > opcodes.OP_16 {
+	for _, e := range scriptSig.ParsedOpCodes {
+		if e.OpValue > opcodes.OP_16 {
 			return 0
 		}
 	}
-	lastOps := s.ParsedOpCodes[len(s.ParsedOpCodes)-1]
-	tempScript := NewScriptRaw(lastOps.Data)
-	//return tempScript.GetSigOpCount(flags, true)
-	return tempScript.GetSigOpCount(true)
 
+	lastOps := scriptSig.ParsedOpCodes[len(scriptSig.ParsedOpCodes)-1]
+	tempScript := NewScriptRaw(lastOps.Data)
+	return tempScript.GetSigOpCount(flags, true)
 }
 
 func EncodeOPN(n int) (int, error) {
@@ -717,9 +729,6 @@ func EncodeOPN(n int) (int, error) {
 func DecodeOPN(opcode byte) int {
 	if opcode == opcodes.OP_0 {
 		return 0
-	}
-	if opcode < opcodes.OP_1 || opcode > opcodes.OP_16 {
-		panic("Decode Opcode err")
 	}
 	return int(opcode) - int(opcodes.OP_1-1)
 }
@@ -798,10 +807,10 @@ func (s *Script) PushOpCode(n int) error {
 
 func (s *Script) PushInt64(n int64) error {
 	if n >= -1 && n <= 16 {
-		if n == -1 || (n >= 1 && n <= 16) {
-			s.data = append(s.data, byte(n+(opcodes.OP_1-1)))
-		} else if n == 0 {
+		if n == 0 {
 			s.data = append(s.data, byte(opcodes.OP_0))
+		} else {
+			s.data = append(s.data, byte(n+(opcodes.OP_1-1)))
 		}
 		err := s.convertOPS()
 		return err
@@ -873,24 +882,17 @@ func (s *Script) Bytes() []byte {
 	return s.data
 }
 
-func CheckSignatureEncoding(vchSig []byte, flags uint32) error {
+func CheckTransactionSignatureEncoding(vchSig []byte, flags uint32) error {
 	// Empty signature. Not strictly DER encoded, but allowed to provide a
 	// compact way to provide an invalid signature for use with CHECK(MULTI)SIG
 	vchSigLen := len(vchSig)
 	if vchSigLen == 0 {
 		return nil
 	}
-	if (flags&(ScriptVerifyDersig|ScriptVerifyLowS|ScriptVerifyStrictEnc)) != 0 &&
-		!crypto.IsValidSignatureEncoding(vchSig) {
-		log.Debug("ScriptErrInvalidSignatureEncoding")
-		return errcode.New(errcode.ScriptErrSigDer)
 
-	}
-	if (flags & ScriptVerifyLowS) != 0 {
-		ret, err := crypto.IsLowDERSignature(vchSig)
-		if err != nil || !ret {
-			return err
-		}
+	ok, err := checkRawSignatureEncoding(vchSig[:len(vchSig)-1], flags)
+	if !ok {
+		return err
 	}
 
 	if (flags & ScriptVerifyStrictEnc) != 0 {
@@ -918,6 +920,23 @@ func CheckSignatureEncoding(vchSig []byte, flags uint32) error {
 	return nil
 }
 
+func checkRawSignatureEncoding(vchSig []byte, flags uint32) (bool, error) {
+	if ((flags & (ScriptVerifyDersig | ScriptVerifyLowS | ScriptVerifyStrictEnc)) != 0) && !crypto.
+		IsValidSignatureEncoding(vchSig) {
+		return false, errcode.New(errcode.ScriptErrSigDer)
+	}
+
+	if (flags & ScriptVerifyLowS) != 0 {
+		var tmp []byte
+		ok := crypto.CheckLowS(append(tmp, vchSig...))
+		if !ok {
+			return ok, errcode.New(errcode.ScriptErrSigHighs)
+		}
+	}
+
+	return true, nil
+}
+
 func CheckPubKeyEncoding(vchPubKey []byte, flags uint32) error {
 	if flags&ScriptVerifyStrictEnc != 0 && !crypto.IsCompressedOrUncompressedPubKey(vchPubKey) {
 		log.Debug("ScriptErrPubKeyType")
@@ -935,41 +954,18 @@ func CheckPubKeyEncoding(vchPubKey []byte, flags uint32) error {
 
 func IsOpCodeDisabled(opCode byte, flags uint32) bool {
 	switch opCode {
-	case opcodes.OP_INVERT:
-		fallthrough
-	case opcodes.OP_2MUL:
-		fallthrough
-	case opcodes.OP_2DIV:
-		fallthrough
-	case opcodes.OP_MUL:
-		fallthrough
-	case opcodes.OP_LSHIFT:
-		fallthrough
-	case opcodes.OP_RSHIFT:
+	case opcodes.OP_INVERT, opcodes.OP_2MUL, opcodes.OP_2DIV,
+		opcodes.OP_MUL, opcodes.OP_LSHIFT, opcodes.OP_RSHIFT:
 		return true
-
-	case opcodes.OP_CAT:
-		fallthrough
-	case opcodes.OP_SPLIT:
-		fallthrough
-	case opcodes.OP_AND:
-		fallthrough
-	case opcodes.OP_OR:
-		fallthrough
-	case opcodes.OP_XOR:
-		fallthrough
-	case opcodes.OP_NUM2BIN:
-		fallthrough
-	case opcodes.OP_BIN2NUM:
-		fallthrough
-	case opcodes.OP_DIV:
-		fallthrough
-	case opcodes.OP_MOD:
-		// Opcodes that have been reenabled.
-		if (flags & ScriptEnableMonolithOpcodes) == 0 {
-			return true
-		}
 	default:
+		return false
 	}
-	return false
+}
+
+func CheckDataSignatureEncoding(vchSig []byte, flags uint32) (bool, error) {
+	if len(vchSig) == 0 {
+		return true, nil
+	}
+
+	return checkRawSignatureEncoding(vchSig, flags)
 }

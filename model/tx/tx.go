@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -111,7 +112,7 @@ func (tx *Tx) AddTxOut(txOut *txout.TxOut) {
 }
 
 func (tx *Tx) GetTxOut(index int) (out *txout.TxOut) {
-	if index < 0 || index > len(tx.outs) {
+	if index < 0 || index >= len(tx.outs) {
 		log.Warn("GetTxOut index %d over large")
 		return nil
 	}
@@ -120,7 +121,7 @@ func (tx *Tx) GetTxOut(index int) (out *txout.TxOut) {
 }
 
 func (tx *Tx) GetTxIn(index int) (out *txin.TxIn) {
-	if index < 0 || index > len(tx.ins) {
+	if index < 0 || index >= len(tx.ins) {
 		log.Warn("GetTxOut index %d over large")
 		return nil
 	}
@@ -144,11 +145,11 @@ func (tx *Tx) PrevoutHashs() (outs []util.Hash) {
 	return
 }
 
-func (tx *Tx) AnyInputTxIn(container *map[util.Hash]struct{}) bool {
+func (tx *Tx) AnyInputTxIn(container map[util.Hash]struct{}) bool {
 	if container != nil {
 		for _, txin := range tx.ins {
 			prevout := txin.PreviousOutPoint.Hash
-			if _, exists := (*container)[prevout]; exists {
+			if _, exists := container[prevout]; exists {
 				return true
 			}
 		}
@@ -162,26 +163,6 @@ func (tx *Tx) GetOutsCount() int {
 }
 func (tx *Tx) GetInsCount() int {
 	return len(tx.ins)
-}
-
-func (tx *Tx) RemoveTxIn(txIn *txin.TxIn) {
-	ret := tx.ins[:0]
-	for _, e := range tx.ins {
-		if e != txIn {
-			ret = append(ret, e)
-		}
-	}
-	tx.ins = ret
-}
-
-func (tx *Tx) RemoveTxOut(txOut *txout.TxOut) {
-	ret := tx.outs[:0]
-	for _, e := range tx.outs {
-		if e != txOut {
-			ret = append(ret, e)
-		}
-	}
-	tx.outs = ret
 }
 
 func (tx *Tx) SerializeSize() uint32 {
@@ -297,13 +278,13 @@ func (tx *Tx) IsCoinBase() bool {
 	return tx.ins[0].PreviousOutPoint.IsNull()
 }
 
-func (tx *Tx) GetSigOpCountWithoutP2SH() int {
+func (tx *Tx) GetSigOpCountWithoutP2SH(flags uint32) int {
 	n := 0
 	for _, in := range tx.ins {
-		n += in.GetScriptSig().GetSigOpCount(false)
+		n += in.GetScriptSig().GetSigOpCount(flags, false)
 	}
 	for _, out := range tx.outs {
-		n += out.GetScriptPubKey().GetSigOpCount(false)
+		n += out.GetScriptPubKey().GetSigOpCount(flags, false)
 	}
 	return n
 }
@@ -322,7 +303,37 @@ func (tx *Tx) CheckRegularTransaction() error {
 		return errcode.NewError(errcode.RejectInvalid, "bad-tx-coinbase")
 	}
 
-	err := tx.checkTransactionCommon(true)
+	err := tx.checkTransactionCommon()
+	if err != nil {
+		return err
+	}
+
+	outPoints := make(map[outpoint.OutPoint]bool)
+	for _, in := range tx.ins {
+		if in.PreviousOutPoint.IsNull() {
+			log.Debug("tx input prevout null")
+			return errcode.NewError(errcode.RejectInvalid, "bad-txns-prevout-null")
+		}
+
+		if _, exists := outPoints[*(in.PreviousOutPoint)]; !exists {
+			outPoints[*(in.PreviousOutPoint)] = true
+		} else {
+			log.Error("bad tx: %s, duplicate inputs:[%s:%d]",
+				tx.hash, in.PreviousOutPoint.Hash, in.PreviousOutPoint.Index)
+			return errcode.NewError(errcode.RejectInvalid, "bad-txns-inputs-duplicate")
+		}
+	}
+
+	return nil
+}
+
+func (tx *Tx) CheckRegularTransactionWhenNewBlock(outPoints map[outpoint.OutPoint]bool) error {
+	if tx.IsCoinBase() {
+		log.Debug("tx should not be coinbase, hash: %s", tx.hash)
+		return errcode.NewError(errcode.RejectInvalid, "bad-tx-coinbase")
+	}
+
+	err := tx.checkTransactionCommon()
 	if err != nil {
 		return err
 	}
@@ -332,6 +343,14 @@ func (tx *Tx) CheckRegularTransaction() error {
 			log.Debug("tx input prevout null")
 			return errcode.NewError(errcode.RejectInvalid, "bad-txns-prevout-null")
 		}
+
+		if _, exists := outPoints[*(in.PreviousOutPoint)]; !exists {
+			outPoints[*(in.PreviousOutPoint)] = true
+		} else {
+			log.Error("bad tx: %s, duplicate inputs:[%s:%d]",
+				tx.hash, in.PreviousOutPoint.Hash, in.PreviousOutPoint.Index)
+			return errcode.NewError(errcode.RejectInvalid, "bad-txns-inputs-duplicate")
+		}
 	}
 
 	return nil
@@ -340,9 +359,9 @@ func (tx *Tx) CheckRegularTransaction() error {
 func (tx *Tx) CheckCoinbaseTransaction() error {
 	if !tx.IsCoinBase() {
 		log.Warn("CheckCoinBaseTransaction: TxErrNotCoinBase")
-		return errcode.New(errcode.RejectInvalid)
+		return errcode.NewError(errcode.RejectInvalid, "bad-cb-missing")
 	}
-	err := tx.checkTransactionCommon(false)
+	err := tx.checkTransactionCommon()
 	if err != nil {
 		return err
 	}
@@ -350,13 +369,13 @@ func (tx *Tx) CheckCoinbaseTransaction() error {
 	// coinbase in script check
 	if tx.ins[0].GetScriptSig().Size() < 2 || tx.ins[0].GetScriptSig().Size() > 100 {
 		log.Debug("coinbash input hash err script size")
-		return errcode.New(errcode.RejectInvalid)
+		return errcode.NewError(errcode.RejectInvalid, "bad-cb-length")
 	}
 
 	return nil
 }
 
-func (tx *Tx) checkTransactionCommon(checkDupInput bool) error {
+func (tx *Tx) checkTransactionCommon() error {
 	//check inputs and outputs
 	if len(tx.ins) == 0 {
 		log.Warn("bad tx: %s, empty ins", tx.hash)
@@ -388,33 +407,12 @@ func (tx *Tx) checkTransactionCommon(checkDupInput bool) error {
 	}
 
 	// check sigopcount
-	sigOpCount := tx.GetSigOpCountWithoutP2SH()
+	sigOpCount := tx.GetSigOpCountWithoutP2SH(script.ScriptEnableCheckDataSig)
 	if sigOpCount > MaxTxSigOpsCounts {
 		log.Debug("bad tx: %s bad-txn-sigops :%d", tx.hash, sigOpCount)
 		return errcode.NewError(errcode.RejectInvalid, "bad-txn-sigops")
 	}
 
-	// check dup input
-	if checkDupInput {
-		outPointSet := make(map[outpoint.OutPoint]bool)
-		err := tx.CheckDuplicateIns(&outPointSet)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-func (tx *Tx) CheckDuplicateIns(outpoints *map[outpoint.OutPoint]bool) error {
-	for _, in := range tx.ins {
-		if _, exists := (*outpoints)[*(in.PreviousOutPoint)]; !exists {
-			(*outpoints)[*(in.PreviousOutPoint)] = true
-		} else {
-			log.Debug("bad tx: %s, duplicate inputs:[%s:%d]",
-				tx.hash, in.PreviousOutPoint.Hash, in.PreviousOutPoint.Index)
-			return errcode.NewError(errcode.RejectInvalid, "bad-txns-inputs-duplicate")
-		}
-	}
 	return nil
 }
 
@@ -462,30 +460,6 @@ func (tx *Tx) IsStandard() (bool, string) {
 	return true, ""
 }
 
-func (tx *Tx) IsCommitment(data []byte) bool {
-	for _, e := range tx.outs {
-		if e.IsCommitment(data) {
-			return true
-		}
-	}
-	return false
-}
-
-//func (tx *Tx) returnScriptBuffers() {
-//	for _, txIn := range tx.ins {
-//		if txIn == nil || txIn.scriptSig == nil {
-//			continue
-//		}
-//		scriptPool.Return(txIn.scriptSig.bytes)
-//	}
-//	for _, txOut := range tx.outs {
-//		if txOut == nil || txOut.scriptPubKey == nil {
-//			continue
-//		}
-//		scriptPool.Return(txOut.scriptPubKey.bytes)
-//	}
-//}
-
 func (tx *Tx) GetValueOut() amount.Amount {
 	var valueOut amount.Amount
 	for _, out := range tx.outs {
@@ -497,91 +471,94 @@ func (tx *Tx) GetValueOut() amount.Amount {
 	return valueOut
 }
 
-func (tx *Tx) SignStep(redeemScripts map[string]string, keys map[string]*crypto.PrivateKey,
-	hashType uint32, scriptPubKey *script.Script, nIn int, value amount.Amount) (sigData [][]byte, pubKeyType int, err error) {
+func (tx *Tx) SignStep(nIn int, keyStore *crypto.KeyStore, redeemScript *script.Script, hashType uint32,
+	scriptPubKey *script.Script, value amount.Amount) (sigData [][]byte, err error) {
 	pubKeyType, pubKeys, isStandard := scriptPubKey.IsStandardScriptPubKey()
-	if !isStandard {
+	if !isStandard || pubKeyType == script.ScriptNonStandard || pubKeyType == script.ScriptNullData {
 		log.Debug("SignStep IsStandardScriptPubKey err")
-		return nil, pubKeyType, errcode.New(errcode.RejectNonstandard)
+		return nil, errcode.New(errcode.RejectNonstandard)
+	}
+	scriptPubKeySign := scriptPubKey
+
+	isScriptHash := false
+	if pubKeyType == script.ScriptHash {
+		if redeemScript == nil {
+			return nil, errors.New("redeem script not found")
+		}
+		isScriptHash = true
+		scriptPubKeySign = redeemScript
+		pubKeyType, pubKeys, isStandard = scriptPubKeySign.IsStandardScriptPubKey()
+		if !isStandard || pubKeyType == script.ScriptNonStandard || pubKeyType == script.ScriptNullData {
+			return nil, errcode.New(errcode.RejectNonstandard)
+		}
 	}
 
-	if pubKeyType == script.ScriptNonStandard || pubKeyType == script.ScriptNullData {
-		log.Debug("SignStep IsStandardScriptPubKey err")
-		return nil, pubKeyType, errcode.New(errcode.RejectNonstandard)
-	}
-
-	if pubKeyType == script.ScriptMultiSig {
-		sigData = make([][]byte, 0, len(pubKeys)-2)
-	} else {
-		sigData = make([][]byte, 0, 1)
-	}
-
-	// return signatureData|hashType
+	sigData = make([][]byte, 0)
 	if pubKeyType == script.ScriptPubkey {
-		pubKeyHashString := string(util.Hash160(pubKeys[0]))
-		privateKey := keys[pubKeyHashString]
-		signature, err := tx.signOne(scriptPubKey, privateKey, hashType, nIn, value)
-		if err != nil {
-			return nil, pubKeyType, err
+		keyPair := keyStore.GetKeyPairByPubKey(pubKeys[0])
+		if keyPair == nil {
+			return nil, errors.New("private key not found")
 		}
-		sigBytes := signature.Serialize()
-		sigBytes = append(sigBytes, byte(hashType))
-		sigData = append(sigData, sigBytes)
-		return sigData, pubKeyType, nil
-	}
-	// return signatureData|hashType + pubKeyHashString
-	if pubKeyType == script.ScriptPubkeyHash {
-		pubKeyHashString := string(pubKeys[0])
-		privateKey := keys[pubKeyHashString]
-		signature, err := tx.signOne(scriptPubKey, privateKey, hashType, nIn, value)
+		signature, err := tx.signOne(scriptPubKeySign, keyPair.GetPrivateKey(), hashType, nIn, value)
 		if err != nil {
-			return nil, pubKeyType, err
+			return nil, err
 		}
-		sigBytes := signature.Serialize()
-		sigBytes = append(sigBytes, byte(hashType))
+		sigBytes := append(signature.Serialize(), byte(hashType))
+		// <signature>
 		sigData = append(sigData, sigBytes)
-		pkBytes := privateKey.PubKey().ToBytes()
-		sigData = append(sigData, pkBytes)
-		return sigData, pubKeyType, nil
-	}
-	// signature1|hashType signature2|hashType...signatureM|hashType
-	if pubKeyType == script.ScriptMultiSig {
-		emptyBytes := []byte{}
-		sigData = append(sigData, emptyBytes)
-		nSigned := 0
-		nRequired := int(pubKeys[0][0])
-		for _, v := range pubKeys[1 : len(pubKeys)-1] {
-			if nSigned < nRequired {
-				pubKyHash := string(util.Hash160(v))
-				privateKey := keys[pubKyHash]
-				signature, err := tx.signOne(scriptPubKey, privateKey, hashType, nIn, value)
-				if err != nil {
-					continue
-				}
-				sigData = append(sigData, append(signature.Serialize(), byte(hashType)))
-				nSigned++
+
+	} else if pubKeyType == script.ScriptPubkeyHash {
+		keyPair := keyStore.GetKeyPair(pubKeys[0])
+		if keyPair == nil {
+			return nil, errors.New("private key not found")
+		}
+		signature, err := tx.signOne(scriptPubKeySign, keyPair.GetPrivateKey(), hashType, nIn, value)
+		if err != nil {
+			return nil, err
+		}
+		sigBytes := append(signature.Serialize(), byte(hashType))
+		pkBytes := keyPair.GetPublicKey().ToBytes()
+		// <signature> <pubkey>
+		sigData = append(sigData, sigBytes, pkBytes)
+
+	} else if pubKeyType == script.ScriptMultiSig {
+		signed := 0
+		required := int(pubKeys[0][0])
+		// <OP_0> <signature0> ... <signatureM>
+		sigData = append(sigData, []byte{})
+		for _, pubKey := range pubKeys[1:] {
+			keyPair := keyStore.GetKeyPairByPubKey(pubKey)
+			if keyPair == nil {
+				log.Info("Private key not found:%s", hex.EncodeToString(pubKey))
+				continue
+			}
+			signature, err := tx.signOne(scriptPubKeySign, keyPair.GetPrivateKey(), hashType, nIn, value)
+			if err != nil {
+				log.Info("getSignatureData error:%s", err.Error())
+				continue
+			}
+			sigBytes := append(signature.Serialize(), byte(hashType))
+			sigData = append(sigData, sigBytes)
+			signed++
+			if signed == required {
+				break
 			}
 		}
+		if signed != required {
+			errMsg := fmt.Sprintf("ScriptMultiSig signed(%d) does not match required(%d)", signed, required)
+			return nil, errors.New(errMsg)
+		}
+	} else {
+		errMsg := fmt.Sprintf("unexpected script type(%d)", pubKeyType)
+		return nil, errors.New(errMsg)
+	}
 
-		if nSigned != nRequired {
-			log.Debug("SignStep signed not equal requiredSigs")
-			return nil, pubKeyType, errcode.New(errcode.TxErrSignRawTransaction)
-		}
-		return sigData, pubKeyType, nil
+	if isScriptHash {
+		// <signature> <redeemscript>
+		sigData = append(sigData, redeemScript.GetData())
 	}
-	// return redeemscript, outside will SignStep again use redeemScript
-	if pubKeyType == script.ScriptHash {
-		scriptHashString := string(pubKeys[0])
-		redeemScriptString := redeemScripts[scriptHashString]
-		if len(redeemScriptString) == 0 {
-			log.Debug("SignStep redeemScript len err")
-			return nil, pubKeyType, errcode.New(errcode.TxErrSignRawTransaction)
-		}
-		sigData = append(sigData, []byte(redeemScriptString))
-		return sigData, pubKeyType, nil
-	}
-	log.Debug("SignStep err")
-	return nil, pubKeyType, errcode.New(errcode.TxErrSignRawTransaction)
+
+	return sigData, nil
 }
 
 func (tx *Tx) signOne(scriptPubKey *script.Script, privateKey *crypto.PrivateKey, hashType uint32,
@@ -609,38 +586,10 @@ func (tx *Tx) UpdateInScript(i int, scriptSig *script.Script) error {
 	return nil
 }
 
-func (tx *Tx) ComputePriority(priorityInputs float64, txSize int) float64 {
-	txModifiedSize := tx.CalculateModifiedSize()
-	if txModifiedSize == 0 {
-		return 0
-	}
-	return priorityInputs / float64(txModifiedSize)
-}
-
-func (tx *Tx) CalculateModifiedSize() uint32 {
-	// In order to avoid disincentivizing cleaning up the UTXO set we don't
-	// count the constant overhead for each txin and up to 110 bytes of
-	// scriptSig (which is enough to cover a compressed pubkey p2sh redemption)
-	// for priority. Providing any more cleanup incentive than making additional
-	// inputs free would risk encouraging people to create junk outputs to
-	// redeem later.
-	txSize := tx.EncodeSize()
-	/*for _, in := range tx.ins {
-
-		InscriptModifiedSize := math.Min(110, float64(len(in.Script.bytes)))
-		offset := 41 + int(InScriptModifiedSize)
-		if txSize > offset {
-			txSize -= offset
-		}
-	}*/
-
-	return txSize
-}
-
 // IsFinal proceeds as follows
-// 1. tx.locktime > 0 and tx.locktime < Threshold, use height to check(tx.locktime > current height)
-// 2. tx.locktime > Threshold, use time to check(tx.locktime > current blocktime)
-// 3. sequence can disable it
+// 1. tx.locktime > 0 and tx.locktime < Threshold, use height to check final (tx.locktime < current height)
+// 2. tx.locktime > Threshold, use time to check final (tx.locktime < current blocktime)
+// 3. sequence can disable it(sequence == sequencefinal)
 func (tx *Tx) IsFinal(Height int32, time int64) bool {
 	if tx.lockTime == 0 {
 		return true
@@ -711,6 +660,16 @@ func (tx *Tx) GetOuts() []*txout.TxOut {
 	return tx.outs
 }
 
+func (tx *Tx) InsertTxOut(pos int, txOut *txout.TxOut) {
+	if pos > len(tx.outs) {
+		tx.outs = append(tx.outs, txOut)
+		return
+	}
+	rear := append([]*txout.TxOut{}, tx.outs[pos:]...)
+	tx.outs = append(tx.outs[:pos], txOut)
+	tx.outs = append(tx.outs, rear...)
+}
+
 func NewTx(locktime uint32, version int32) *Tx {
 	tx := &Tx{lockTime: locktime, version: version}
 	tx.ins = make([]*txin.TxIn, 0)
@@ -726,20 +685,38 @@ func NewGenesisCoinbaseTx() *Tx {
 	tx := NewTx(0, DefaultVersion)
 	scriptSigNum := script.NewScriptNum(4)
 	scriptSigString := "The Times 03/Jan/2009 Chancellor on brink of second bailout for banks"
-	//scriptSigData := make([][]byte, 0)
-	//scriptSigData = append(scriptSigData, []byte(scriptSigString))
 
 	scriptPubKeyBytes, _ := hex.DecodeString("04678afdb0fe5548271967f1a67130b7105cd6a828e03909" +
 		"a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112" +
 		"de5c384df7ba0b8d578a4c702b6bf11d5f")
 	scriptPubKey := script.NewEmptyScript()
-	scriptPubKey.PushSingleData(scriptPubKeyBytes)
-	scriptPubKey.PushOpCode(opcodes.OP_CHECKSIG)
+	err := scriptPubKey.PushSingleData(scriptPubKeyBytes)
+	if err != nil {
+		log.Error("push single data error:%v", err)
+		return nil
+	}
+	err = scriptPubKey.PushOpCode(opcodes.OP_CHECKSIG)
+	if err != nil {
+		log.Error("push single data error:%v", err)
+		return nil
+	}
 
 	scriptSig := script.NewEmptyScript()
-	scriptSig.PushInt64(486604799)
-	scriptSig.PushScriptNum(scriptSigNum)
-	scriptSig.PushSingleData([]byte(scriptSigString))
+	err = scriptSig.PushInt64(486604799)
+	if err != nil {
+		log.Error("push int64 error:%v", err)
+		return nil
+	}
+	err = scriptSig.PushScriptNum(scriptSigNum)
+	if err != nil {
+		log.Error("push script num error:%v", err)
+		return nil
+	}
+	err = scriptSig.PushSingleData([]byte(scriptSigString))
+	if err != nil {
+		log.Error("push single data error:%v", err)
+		return nil
+	}
 
 	txIn := txin.NewTxIn(nil, scriptSig, math.MaxUint32)
 	txOut := txout.NewTxOut(50*100000000, scriptPubKey)

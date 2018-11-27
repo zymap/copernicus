@@ -8,19 +8,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/copernet/copernicus/errcode"
+	"net"
 	"strconv"
 	"strings"
 
 	"github.com/copernet/copernicus/conf"
+	"github.com/copernet/copernicus/errcode"
 	"github.com/copernet/copernicus/log"
-	"github.com/copernet/copernicus/model/mempool"
+	"github.com/copernet/copernicus/model/block"
 	"github.com/copernet/copernicus/net/wire"
 	"github.com/copernet/copernicus/peer"
 	"github.com/copernet/copernicus/rpc/btcjson"
 	"github.com/copernet/copernicus/service"
 	"github.com/copernet/copernicus/util"
-	"net"
 )
 
 type MsgHandle struct {
@@ -29,6 +29,7 @@ type MsgHandle struct {
 }
 
 var msgHandle *MsgHandle
+var rpcConnMgr *RPCConnManager
 
 // SetMsgHandle create a msgHandle for these message from peer And RPC.
 // Then begins the core block handler which processes block and inv messages.
@@ -36,6 +37,7 @@ func SetMsgHandle(ctx context.Context, msgChan <-chan *peer.PeerMessage, server 
 	msg := &MsgHandle{msgChan, server}
 	go msg.startProcess(ctx)
 	msgHandle = msg
+	rpcConnMgr = NewRPCConnManager(msgHandle.Server)
 }
 
 func (mh *MsgHandle) startProcess(ctx context.Context) {
@@ -45,11 +47,21 @@ out:
 		select {
 		case msg := <-mh.recvMsgFromPeers:
 			peerFrom := msg.Peerp
+			if err := mh.checkMsg(msg); err != nil {
+				log.Error("recv msg[%s] check error: %s", msg.Msg.Command(), err.Error())
+				msg.Done <- struct{}{}
+				continue
+			}
+
 			switch data := msg.Msg.(type) {
 			case *wire.MsgVersion:
-				peerFrom.PushRejectMsg(data.Command(), errcode.RejectDuplicate, "duplicate version message",
-					nil, false)
-				peerFrom.Disconnect()
+				if peerFrom.VersionKnown() {
+					peerFrom.PushRejectMsg(data.Command(), errcode.RejectDuplicate, "Duplicate version message",
+						nil, false)
+					mh.AddBanScore(peerFrom.Addr(), 0, 1, "multiple-version")
+				} else {
+					peerFrom.HandleVersionMsg(data)
+				}
 				msg.Done <- struct{}{}
 			case *wire.MsgVerAck:
 				if peerFrom.VerAckReceived() {
@@ -174,6 +186,7 @@ out:
 				}
 				msg.Done <- struct{}{}
 			case *wire.MsgSendHeaders:
+				peerFrom.SetPreferHeaders()
 				if peerFrom.Cfg.Listeners.OnSendHeaders != nil {
 					peerFrom.Cfg.Listeners.OnSendHeaders(peerFrom, data)
 				}
@@ -181,6 +194,7 @@ out:
 			default:
 				log.Debug("Received unhandled message of type %v "+
 					"from %v", data, data.Command())
+				msg.Done <- struct{}{}
 			}
 		case <-ctx.Done():
 			log.Info("msgHandle service exit. function : startProcess")
@@ -188,6 +202,28 @@ out:
 		}
 	}
 
+}
+
+func (mh *MsgHandle) checkMsg(msg *peer.PeerMessage) error {
+	if _, ok := msg.Msg.(*wire.MsgReject); ok {
+		return nil
+	}
+
+	peerFrom := msg.Peerp
+	if !peerFrom.VersionKnown() {
+		// Must have a version message before anything else
+		if _, ok := msg.Msg.(*wire.MsgVersion); !ok {
+			mh.AddBanScore(peerFrom.Addr(), 0, 1, "missing-version")
+			return errors.New("missing-version")
+		}
+	} else if !peerFrom.VerAckReceived() {
+		// Must have a verack message before anything else
+		if _, ok := msg.Msg.(*wire.MsgVerAck); !ok {
+			mh.AddBanScore(peerFrom.Addr(), 0, 1, "missing-verack")
+			return errors.New("missing-verack")
+		}
+	}
+	return nil
 }
 
 // ProcessForRPC are RPC process things
@@ -205,30 +241,24 @@ func ProcessForRPC(message interface{}) (rsp interface{}, err error) {
 		return nil, nil
 
 	case *service.GetPeersInfoRequest:
-		return NewRPCConnManager(msgHandle.Server).ConnectedPeers(), nil
+		return rpcConnMgr.ConnectedPeers(), nil
 
 	case *btcjson.AddNodeCmd:
 		cmd := message.(*btcjson.AddNodeCmd)
 		var err error
 		switch cmd.SubCmd {
 		case "add":
-			err = NewRPCConnManager(msgHandle.Server).Connect(cmd.Addr, true)
+			err = rpcConnMgr.Connect(cmd.Addr, true)
 		case "remove":
-			err = NewRPCConnManager(msgHandle.Server).RemoveByAddr(cmd.Addr)
+			err = rpcConnMgr.RemoveByAddr(cmd.Addr)
 		case "onetry":
-			err = NewRPCConnManager(msgHandle.Server).Connect(cmd.Addr, false)
+			err = rpcConnMgr.Connect(cmd.Addr, false)
 		default:
-			return nil, &btcjson.RPCError{
-				Code:    btcjson.ErrRPCInvalidParameter,
-				Message: "invalid subcommand for addnode",
-			}
+			return nil, btcjson.NewRPCError(btcjson.ErrRPCInvalidParameter, "invalid subcommand for addnode")
 		}
 
 		if err != nil {
-			return nil, &btcjson.RPCError{
-				Code:    btcjson.ErrRPCInvalidParameter,
-				Message: err.Error(),
-			}
+			return nil, btcjson.NewRPCError(btcjson.ErrRPCInvalidParameter, err.Error())
 		}
 		return nil, nil
 
@@ -236,31 +266,31 @@ func ProcessForRPC(message interface{}) (rsp interface{}, err error) {
 		cmd := message.(*btcjson.DisconnectNodeCmd)
 
 		var addr string
-		var nodeID uint64
-		var errN, err error
+		var nodeID int32
+		var err error
 
 		// If we have a valid uint disconnect by node id. Otherwise,
 		// attempt to disconnect by address, returning an error if a
 		// valid IP address is not supplied.
-		if nodeID, errN = strconv.ParseUint(cmd.Target, 10, 32); errN == nil {
-			err = NewRPCConnManager(msgHandle.Server).DisconnectByID(int32(nodeID))
-		} else {
-			if host, port, errP := net.SplitHostPort(cmd.Target); errP == nil {
+		if cmd.Address == nil && cmd.NodeID != nil {
+			nodeID = *cmd.NodeID
+			err = rpcConnMgr.DisconnectByID(nodeID)
+		} else if cmd.Address != nil && cmd.NodeID == nil {
+			if host, port, errP := net.SplitHostPort(*cmd.Address); errP == nil {
 				addr = net.JoinHostPort(host, port)
-				err = NewRPCConnManager(msgHandle.Server).DisconnectByAddr(addr)
+				err = rpcConnMgr.DisconnectByAddr(addr)
 			} else {
-				return nil, &btcjson.RPCError{
-					Code:    btcjson.ErrRPCInvalidParameter,
-					Message: "invalid address or node ID",
-				}
+				return nil, btcjson.NewRPCError(btcjson.ErrRPCInvalidParameter, "Invalid address or node ID")
 			}
+		} else {
+			return nil, btcjson.NewRPCError(btcjson.ErrRPCInvalidParameter,
+				"Only one of address and nodeid should be provided.")
 		}
-		if err != nil && peerExists(addr, int32(nodeID)) {
-
-			return nil, &btcjson.RPCError{
-				Code:    btcjson.ErrRPCMisc,
-				Message: "can't disconnect a permanent peer, use remove",
+		if err != nil {
+			if peerExists(addr, nodeID) {
+				return nil, btcjson.NewRPCError(btcjson.ErrRPCMisc, "Can't disconnect a permanent peer, use remove")
 			}
+			return nil, btcjson.NewRPCError(btcjson.RPCClientNodeNotConnected, "Node not found in connected nodes")
 		}
 		return nil, nil
 
@@ -271,19 +301,30 @@ func ProcessForRPC(message interface{}) (rsp interface{}, err error) {
 		return
 
 	case *btcjson.GetNetworkInfoCmd:
-		return GetNetworkInfo()
+		return handleGetNetworkInfo()
 
 	case *btcjson.SetBanCmd:
-		return
+		cmd := message.(*btcjson.SetBanCmd)
+		err := rpcConnMgr.SetBan(cmd)
+		return nil, err
 
-	case *service.ListBannedRequest:
-		return
+	case *btcjson.ListBannedCmd:
+		ret, err := rpcConnMgr.ListBanned()
+		return ret, err
 
-	case *service.ClearBannedRequest:
-		return
+	case *btcjson.ClearBannedCmd:
+		rpcConnMgr.ClearBanned()
+		return nil, nil
+
 	case *wire.InvVect:
-		return
+		msgHandle.RelayInventory(m, nil)
+		return nil, nil
 
+	case *block.Block:
+		done := make(chan error)
+		msgHandle.HandleMinedBlock(m, done)
+		err := <-done
+		return nil, err
 		//case *tx.Tx:
 		//	msgHandle.recvChannel <- m
 		//	ret := <-msgHandle.resultChannel
@@ -308,7 +349,7 @@ func ProcessForRPC(message interface{}) (rsp interface{}, err error) {
 	return nil, errors.New("unknown rpc request")
 }
 
-func GetNetworkInfo() (*btcjson.GetNetworkInfoResult, error) {
+func handleGetNetworkInfo() (*btcjson.GetNetworkInfoResult, error) {
 	verNum := 0
 	vers := strings.Split(conf.Cfg.Version, ".")
 	for _, ver := range vers {
@@ -333,13 +374,13 @@ func GetNetworkInfo() (*btcjson.GetNetworkInfoResult, error) {
 		Version:          verNum,
 		SubVersion:       "/Copernicus:" + conf.Cfg.Version + "/",
 		ProtocolVersion:  wire.ProtocolVersion,
-		LocalServices:    "0", // TODO:
+		LocalServices:    fmt.Sprintf("%016x", msgHandle.services),
 		LocalRelay:       !conf.Cfg.P2PNet.BlocksOnly,
 		TimeOffset:       util.GetTimeOffset(),
 		Connections:      msgHandle.ConnectedCount(),
 		NetworkActive:    true, // NOT support RPC 'setnetworkactive'
-		Networks:         getNetworksInfo(),
-		RelayFee:         valueFromAmount(mempool.GetInstance().GetMinFeeRate().SataoshisPerK),
+		Networks:         getNetworks(),
+		RelayFee:         valueFromAmount(util.NewFeeRate(util.DefaultMinRelayTxFeePerK).GetFeePerK()),
 		ExcessUtxoCharge: 0,
 		LocalAddresses:   rpcLocalAddrList,
 		Warnings:         "", // TODO: network warnings
@@ -347,7 +388,7 @@ func GetNetworkInfo() (*btcjson.GetNetworkInfoResult, error) {
 	return chainInfo, nil
 }
 
-func getNetworksInfo() []btcjson.NetworksResult {
+func getNetworks() []btcjson.NetworksResult {
 	networkInfos := make([]btcjson.NetworksResult, 0)
 	ipv4NetWork := btcjson.NetworksResult{
 		Name:      "ipv4",
@@ -399,7 +440,7 @@ func valueFromAmount(sizeLimit int64) float64 {
 // information about all currently connected peers. Peer existence is
 // determined using either a target address or node id.
 func peerExists(addr string, nodeID int32) bool {
-	connected := NewRPCConnManager(msgHandle.Server).ConnectedPeers()
+	connected := rpcConnMgr.ConnectedPeers()
 
 	for _, p := range connected {
 		if p.ToPeer().ID() == nodeID || p.ToPeer().Addr() == addr {

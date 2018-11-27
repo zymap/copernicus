@@ -11,10 +11,8 @@ import (
 	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/model/blockindex"
 
-	"github.com/copernet/copernicus/model/consensus"
 	"github.com/copernet/copernicus/model/pow"
 	"github.com/copernet/copernicus/model/script"
-	"github.com/copernet/copernicus/model/versionbits"
 	"github.com/copernet/copernicus/persist"
 	"github.com/copernet/copernicus/util"
 	"gopkg.in/eapache/queue.v1"
@@ -150,16 +148,18 @@ func (c *Chain) GetChainTips() *set.Set {
 
 // Tip Returns the blIndex entry for the tip of this chain, or nullptr if none.
 func (c *Chain) Tip() *blockindex.BlockIndex {
-	if len(c.active) > 0 {
-		return c.active[len(c.active)-1]
+	active := c.active
+	if len(active) > 0 {
+		return active[len(active)-1]
 	}
 
 	return nil
 }
 
 func (c *Chain) TipHeight() int32 {
-	if len(c.active) > 0 {
-		return c.active[len(c.active)-1].Height
+	active := c.active
+	if len(active) > 0 {
+		return active[len(active)-1].Height
 	}
 
 	return 0
@@ -180,7 +180,7 @@ func (c *Chain) IsCurrent() bool {
 	//}
 
 	// Not current if the latest best block has a timestamp before 24 hours ago.
-	minus24Hours := time.Now().Add(-24 * time.Hour).Unix()
+	minus24Hours := time.Unix(util.GetTime(), 0).Add(-24 * time.Hour).Unix()
 	tipTime := int64(c.Tip().GetBlockTime())
 
 	return tipTime >= minus24Hours
@@ -225,13 +225,13 @@ func (c *Chain) GetBlockScriptFlags(pindex *blockindex.BlockIndex) uint32 {
 	}
 
 	// Start enforcing CSV (BIP68, BIP112 and BIP113) rule.
-	//if pindex.Height+1 >= param.CSVHeight {
-	//	flags |= script.ScriptVerifyCheckSequenceVerify
-	//}
-	// Start enforcing BIP112 (CHECKSEQUENCEVERIFY) using versionbits logic.
-	if versionbits.VersionBitsState(pindex, param, consensus.DeploymentCSV, versionbits.VBCache) == versionbits.ThresholdActive {
+	if pindex.Height+1 >= param.CSVHeight {
 		flags |= script.ScriptVerifyCheckSequenceVerify
 	}
+	//// Start enforcing BIP112 (CHECKSEQUENCEVERIFY) using versionbits logic.
+	//if versionbits.VersionBitsState(pindex, param, consensus.DeploymentCSV, versionbits.VBCache) == versionbits.ThresholdActive {
+	//	flags |= script.ScriptVerifyCheckSequenceVerify
+	//}
 
 	// If the UAHF is enabled, we start accepting replay protected txns
 	if model.IsUAHFEnabled(pindex.Height) {
@@ -251,15 +251,17 @@ func (c *Chain) GetBlockScriptFlags(pindex *blockindex.BlockIndex) uint32 {
 		flags |= script.ScriptVerifyLowS
 		flags |= script.ScriptVerifyNullFail
 	}
-	//The monolith HF enable a set of opcodes.
-	if model.IsMonolithEnabled(pindex.GetMedianTimePast()) {
-		flags |= script.ScriptEnableMonolithOpcodes
+
+	// When the magnetic anomaly fork is enabled, we start accepting
+	// transactions using the OP_CHECKDATASIG opcode and it's verify
+	// alternative. We also start enforcing push only signatures and
+	// clean stack.
+	if model.IsMagneticAnomalyEnabled(pindex.GetMedianTimePast()) {
+		flags |= script.ScriptEnableCheckDataSig
+		flags |= script.ScriptVerifySigPushOnly
+		flags |= script.ScriptVerifyCleanStack
 	}
-	//if chainparams.IsMagneticAnomalyEnable(pindex.GetMedianTimePast()) {
-	//	flags |= script.ScriptEnableCheckDataSig
-	//	flags |= script.ScriptVerifySigPushOnly
-	//	flags |= script.ScriptVerifyCleanStack
-	//}
+
 	// We make sure this node will have replay protection during the next hard
 	// fork.
 	if model.IsReplayProtectionEnabled(pindex.GetMedianTimePast()) {
@@ -325,11 +327,12 @@ func (c *Chain) SetTip(index *blockindex.BlockIndex) {
 
 	tmp := make([]*blockindex.BlockIndex, index.Height+1)
 	copy(tmp, c.active)
-	c.active = tmp
-	for index != nil && c.active[index.Height] != index {
-		c.active[index.Height] = index
+	for index != nil && tmp[index.Height] != index {
+		tmp[index.Height] = index
 		index = index.Prev
 	}
+
+	c.active = tmp
 
 	c.UpdateSyncingState()
 }
@@ -449,9 +452,41 @@ func (c *Chain) InBranch(pindex *blockindex.BlockIndex) bool {
 func (c *Chain) insertToBranch(bis *blockindex.BlockIndex) {
 	c.branch = append(c.branch, bis)
 	sort.SliceStable(c.branch, func(i, j int) bool {
+		// First sort by most total work, ...
 		jWork := c.branch[j].ChainWork
-		return c.branch[i].ChainWork.Cmp(&jWork) == -1
+		//return c.branch[i].ChainWork.Cmp(&jWork) == -1
+		if c.branch[i].ChainWork.Cmp(&jWork) == 1 {
+			return false
+		}
+		if c.branch[i].ChainWork.Cmp(&jWork) == -1 {
+			return true
+		}
+
+		// ... then by earliest time received, ...
+		//if c.branch[i].SequenceID < c.branch[j].SequenceID {
+		//	return false
+		//}
+		//if c.branch[i].SequenceID > c.branch[j].SequenceID {
+		//	return true
+		//}
+
+		return false
 	})
+}
+
+func (c *Chain) ResetBlockFailureFlags(targetBI *blockindex.BlockIndex) {
+	for _, bi := range c.indexMap {
+		if bi.IsInvalid() && bi.GetAncestor(targetBI.Height) == targetBI {
+			bi.SubStatus(blockindex.BlockFailedParent)
+			persist.GetInstance().AddDirtyBlockIndex(bi)
+
+			if bi.IsValid(blockindex.BlockValidTransactions) && bi.ChainTxCount > 0 {
+				if !c.InBranch(bi) {
+					c.insertToBranch(bi)
+				}
+			}
+		}
+	}
 }
 
 func (c *Chain) AddToBranch(bis *blockindex.BlockIndex) error {

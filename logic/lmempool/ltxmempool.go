@@ -3,14 +3,14 @@ package lmempool
 import (
 	"container/list"
 	"fmt"
+	"github.com/copernet/copernicus/model/wallet"
 	"math"
 
 	"github.com/copernet/copernicus/conf"
 	"github.com/copernet/copernicus/errcode"
 	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/logic/ltx"
-	"github.com/copernet/copernicus/model/chain"
-	"github.com/copernet/copernicus/model/consensus"
+	//"github.com/copernet/copernicus/model/consensus"
 	"github.com/copernet/copernicus/model/mempool"
 	"github.com/copernet/copernicus/model/outpoint"
 	"github.com/copernet/copernicus/model/tx"
@@ -35,6 +35,8 @@ func addTxToMemPool(txe *mempool.TxEntry) error {
 	descendantNum := conf.Cfg.Mempool.LimitDescendantCount
 	descendantSize := conf.Cfg.Mempool.LimitDescendantSize
 
+	pool.Lock()
+	defer pool.Unlock()
 	ancestors, err := pool.CalculateMemPoolAncestors(txe.Tx, uint64(ancestorNum), uint64(ancestorSize*1000),
 		uint64(descendantNum), uint64(descendantSize*1000), true)
 
@@ -42,11 +44,20 @@ func addTxToMemPool(txe *mempool.TxEntry) error {
 		return err
 	}
 
-	pool.AddTx(txe, ancestors)
+	err = pool.AddTx(txe, ancestors)
+	if err != nil {
+		log.Error("add tx failed:%s", err.Error())
+		return err
+	}
+
+	// TODO: simple implementation just for testing, remove this after complete wallet
+	if wallet.GetInstance().IsEnable() {
+		wallet.GetInstance().HandleRelatedMempoolTx(txe.Tx)
+	}
 	return nil
 }
 
-func TryAcceptOrphansTxs(transaction *tx.Tx) (acceptTxs []*tx.Tx, rejectTxs []util.Hash) {
+func TryAcceptOrphansTxs(transaction *tx.Tx, chainHeight int32, checkLockPoint bool) (acceptTxs []*tx.Tx, rejectTxs []util.Hash) {
 	vWorkQueue := make([]outpoint.OutPoint, 0)
 	pool := mempool.GetInstance()
 
@@ -88,7 +99,6 @@ func TryAcceptOrphansTxs(transaction *tx.Tx) (acceptTxs []*tx.Tx, rejectTxs []ut
 			}
 		}
 	}
-
 	return
 }
 
@@ -96,100 +106,145 @@ func RemoveTxSelf(txs []*tx.Tx) {
 	pool := mempool.GetInstance()
 	pool.RemoveTxSelf(txs)
 }
-
 func RemoveForReorg(nMemPoolHeight int32, flag int) {
-	//gChain := chain.GetInstance()
-	view := utxo.GetUtxoCacheInstance()
-	pool := mempool.GetInstance()
-	pool.Lock()
-	defer pool.Unlock()
-
-	// Remove transactions spending a coinbase which are now immature and
-	// no-longer-final transactions
-	txToRemove := make(map[*mempool.TxEntry]struct{})
-	allEntry := pool.GetAllTxEntryWithoutLock()
-	for _, entry := range allEntry {
-		//lp := entry.GetLockPointFromTxEntry()
-		//validLP := entry.CheckLockPointValidity(gChain)
-		//state := NewValidationState()
-
-		tx := entry.Tx
-		allPreout := tx.GetAllPreviousOut()
-		coins := make([]*utxo.Coin, len(allPreout))
-		for i, preout := range allPreout {
-			if coin := view.GetCoin(&preout); coin != nil {
-				coins[i] = coin
-			} else {
-				if coin := pool.GetCoin(&preout); coin != nil {
-					coins[i] = coin
-				} else {
-					panic("the transaction in mempool, not found its parent " +
-						"transaction in local node and utxo")
-				}
+	newPool := mempool.NewTxMempool()
+	oldPool := mempool.GetInstance()
+	log.Debug("RemoveForReorg start")
+	mempool.SetInstance(newPool)
+	for _, txentry := range oldPool.GetAllTxEntry() {
+		txn := txentry.Tx
+		err := AcceptTxToMemPool(txn)
+		if err == nil {
+			accepttxn, _ := TryAcceptOrphansTxs(txn, nMemPoolHeight-1, true)
+			log.Debug("RemoveForReorg move %v to mempool", append(accepttxn, txn))
+			if !newPool.HaveTransaction(txn) {
+				log.Error("the tx:%s not exist mempool", txn.GetHash().String())
+				return
+			}
+		} else {
+			if errcode.IsErrorCode(err, errcode.TxErrNoPreviousOut) {
+				newPool.AddOrphanTx(txn, 0)
 			}
 		}
-		tlp := ltx.CalculateLockPoints(tx, uint32(flag))
-		if tlp == nil {
-			panic("nil lockpoint, the transaction has no preout")
-		}
-		if ltx.ContextualCheckTransactionForCurrentBlock(tx, flag) != nil ||
-			!ltx.CheckSequenceLocks(tlp.Height, tlp.Time) {
-			txToRemove[entry] = struct{}{}
-		} else if entry.GetSpendsCoinbase() {
-			for _, preout := range tx.GetAllPreviousOut() {
-				if _, ok := allEntry[preout.Hash]; ok {
-					continue
-				}
+	}
+	newPool.CleanOrphan()
+	CheckMempool(nMemPoolHeight - 1)
+	log.Debug("RemoveForReorg end")
+}
 
-				coin := view.GetCoin(&preout)
-				if pool.GetCheckFrequency() != 0 {
-					if coin.IsSpent() {
-						panic("the coin must be unspent")
-					}
-				}
+// func RemoveForReorg2(nMemPoolHeight int32, flag int) {
+// 	view := utxo.GetUtxoCacheInstance()
+// 	pool := mempool.GetInstance()
+// 	pool.Lock()
+// 	defer pool.Unlock()
 
-				if coin.IsSpent() || (coin.IsCoinBase() &&
-					nMemPoolHeight-coin.GetHeight() < consensus.CoinbaseMaturity) {
-					txToRemove[entry] = struct{}{}
-					break
-				}
+// 	// Remove transactions spending a coinbase which are now immature and
+// 	// no-longer-final transactions
+// 	txToRemove := make(map[*mempool.TxEntry]struct{})
+// 	allEntry := pool.GetAllTxEntryWithoutLock()
+// 	for _, entry := range allEntry {
+// 		tmpTx := entry.Tx
+// 		allPreout := tmpTx.GetAllPreviousOut()
+// 		coins := make([]*utxo.Coin, len(allPreout))
+// 		for i, preout := range allPreout {
+// 			if coin := view.GetCoin(&preout); coin != nil {
+// 				coins[i] = coin
+// 			} else {
+// 				if coin := pool.GetCoin(&preout); coin != nil {
+// 					coins[i] = coin
+// 				} else {
+// 					panic("the transaction in mempool, not found its parent " +
+// 						"transaction in local node and utxo")
+// 				}
+// 			}
+// 		}
+// 		tlp := ltx.CalculateLockPoints(tmpTx, uint32(flag))
+// 		if tlp == nil {
+// 			panic("nil lockpoint, the transaction has no preout")
+// 		}
+// 		if ltx.ContextualCheckTransactionForCurrentBlock(tmpTx, flag) != nil ||
+// 			!ltx.CheckSequenceLocks(tlp.Height, tlp.Time) {
+// 			txToRemove[entry] = struct{}{}
+// 		} else if entry.GetSpendsCoinbase() {
+// 			for _, preout := range tmpTx.GetAllPreviousOut() {
+// 				if _, ok := allEntry[preout.Hash]; ok {
+// 					continue
+// 				}
+
+// 				coin := view.GetCoin(&preout)
+// 				if pool.GetCheckFrequency() != 0 {
+// 					if coin.IsSpent() {
+// 						panic("the coin must be unspent")
+// 					}
+// 				}
+
+// 				if coin.IsSpent() || (coin.IsCoinBase() &&
+// 					nMemPoolHeight-coin.GetHeight() < consensus.CoinbaseMaturity) {
+// 					txToRemove[entry] = struct{}{}
+// 					break
+// 				}
+// 			}
+// 		}
+// 		entry.SetLockPointFromTxEntry(*tlp)
+// 	}
+
+// 	allRemoves := make(map[*mempool.TxEntry]struct{})
+// 	for it := range txToRemove {
+// 		pool.CalculateDescendants(it, allRemoves)
+// 	}
+// 	pool.RemoveStaged(allRemoves, false, mempool.REORG)
+// }
+
+func updateCoins(coinsMap *utxo.CoinsMap, trax *tx.Tx) {
+	isCoinBase := trax.IsCoinBase()
+	if !isCoinBase {
+		for _, preout := range trax.GetAllPreviousOut() {
+			if coinsMap.SpendCoin(&preout) == nil {
+				panic(fmt.Sprintf("no spentable coin for prevout(%v)", preout))
 			}
 		}
-
-		//if !validLP {
-		entry.SetLockPointFromTxEntry(*tlp)
-		//}
 	}
-
-	allRemoves := make(map[*mempool.TxEntry]struct{})
-	for it := range txToRemove {
-		pool.CalculateDescendants(it, allRemoves)
+	for i := 0; i < trax.GetOutsCount(); i++ {
+		a := outpoint.OutPoint{Hash: trax.GetHash(), Index: uint32(i)}
+		coinsMap.AddCoin(&a, utxo.NewFreshCoin(trax.GetTxOut(i), 1000000, isCoinBase), isCoinBase)
 	}
-	pool.RemoveStaged(allRemoves, false, mempool.REORG)
+}
+
+func haveInputs(coinsMap *utxo.CoinsMap, trax *tx.Tx) bool {
+	if trax.IsCoinBase() {
+		return true
+	}
+	for _, preout := range trax.GetAllPreviousOut() {
+		if coinsMap.FetchCoin(&preout) == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // CheckMempool check If sanity-checking is turned on, check makes sure the pool is consistent
 // (does not contain two transactions that spend the same inputs, all inputs
 // are in the mapNextTx array). If sanity-checking is turned off, check does
 // nothing.
-func CheckMempool() {
+func CheckMempool(bestHeight int32) {
+	spentHeight := bestHeight + 1
 	view := utxo.GetUtxoCacheInstance()
 	pool := mempool.GetInstance()
-	pool.Lock()
-	defer pool.Unlock()
+	pool.RLock()
+	defer pool.RUnlock()
 
 	if pool.GetCheckFrequency() == 0 {
 		return
 	}
-	if float64(util.GetRand(math.MaxUint32)) >= pool.GetCheckFrequency() {
+	if util.GetRand(math.MaxUint32) >= pool.GetCheckFrequency() {
 		return
 	}
-	activaChain := chain.GetInstance()
+	// activaChain := chain.GetInstance()
 	mempoolDuplicate := utxo.NewEmptyCoinsMap()
 	allEntry := pool.GetAllTxEntryWithoutLock()
 	spentOut := pool.GetAllSpentOutWithoutLock()
-	bestHash, _ := view.GetBestBlock()
-	bestHeigh := activaChain.FindBlockIndex(bestHash).Height + 1
+	//bestHash, _ := view.GetBestBlock()
+	//bestHeigh := activaChain.FindBlockIndex(bestHash).Height + 1
 	log.Debug("mempool", fmt.Sprintf("checking mempool with %d transaction and %d inputs ...", len(allEntry), len(spentOut)))
 	checkTotal := uint64(0)
 
@@ -205,10 +260,8 @@ func CheckMempool() {
 		for _, preout := range entry.Tx.GetAllPreviousOut() {
 			if entry, ok := allEntry[preout.Hash]; ok {
 				tx2 := entry.Tx
-				if !(tx2.GetOutsCount() > int(preout.Index)) {
-					if !tx2.GetTxOut(int(preout.Index)).IsNull() {
-						panic("the tx introduced input dose not exist, or the input amount is nil ")
-					}
+				if !(tx2.GetOutsCount() > int(preout.Index) && !tx2.GetTxOut(int(preout.Index)).IsNull()) {
+					panic("the tx introduced input dose not exist, or the input amount is nil ")
 				}
 
 				fDependsWait = true
@@ -283,22 +336,19 @@ func CheckMempool() {
 		if fDependsWait {
 			waitingOnDependants.PushBack(entry)
 		} else {
-			//todo !!! need to fix error in here by yyx.
-			//fCheckResult := entry.Tx.IsCoinBase() || ltx.CheckInputsMoney(entry.Tx, ) == nil
-			//if !fCheckResult {
-			//	panic("the txentry check failed with utxo set...")
-			//}
-			//ltx.CheckInputsMoney(entry.Tx, view, bestHeigh)
-			_ = bestHeigh
+			fCheckResult := entry.Tx.IsCoinBase()
+			if !fCheckResult {
+				for _, e := range entry.Tx.GetIns() {
+					mempoolDuplicate.FetchCoin(e.PreviousOutPoint)
+				}
+				fCheckResult = ltx.CheckInputsMoney(entry.Tx, mempoolDuplicate,
+					spentHeight) == nil
+			}
 
-			for _, preout := range entry.Tx.GetAllPreviousOut() {
-				mempoolDuplicate.SpendCoin(&preout)
+			if !fCheckResult {
+				panic("the txentry check failed with utxo set1...")
 			}
-			isCoinBase := entry.Tx.IsCoinBase()
-			for i := 0; i < entry.Tx.GetOutsCount(); i++ {
-				a := outpoint.OutPoint{Hash: entry.Tx.GetHash(), Index: uint32(i)}
-				mempoolDuplicate.AddCoin(&a, utxo.NewCoin(entry.Tx.GetTxOut(i), 1000000, isCoinBase), isCoinBase)
-			}
+			updateCoins(mempoolDuplicate, entry.Tx)
 		}
 	}
 
@@ -307,41 +357,28 @@ func CheckMempool() {
 		it := waitingOnDependants.Front()
 		entry := it.Value.(*mempool.TxEntry)
 		waitingOnDependants.Remove(it)
-		spend := false
-		for _, preOut := range entry.Tx.GetAllPreviousOut() {
-			co := mempoolDuplicate.GetCoin(&preOut)
-			if !(co != nil && !co.IsSpent()) {
-				waitingOnDependants.PushBack(entry)
-				stepsSinceLastRemove++
-				if !(stepsSinceLastRemove < waitingOnDependants.Len()) {
-					panic("the waitingOnDependants list have incorrect number ...")
-				}
-				spend = true
-				break
+
+		if !haveInputs(mempoolDuplicate, entry.Tx) {
+			waitingOnDependants.PushBack(entry)
+			stepsSinceLastRemove++
+			if stepsSinceLastRemove >= waitingOnDependants.Len() {
+				panic(fmt.Sprintf(
+					"stepsSinceLastRemove(%d) should be less then length of waitingOnDependants(%d)",
+					stepsSinceLastRemove, waitingOnDependants.Len()))
 			}
-		}
-
-		if spend {
+		} else {
 			fCheckResult := entry.Tx.IsCoinBase()
-
-			for _, preOut := range entry.Tx.GetAllPreviousOut() {
-				co := mempoolDuplicate.GetCoin(&preOut)
-				if !(co != nil && !co.IsSpent()) {
-					fCheckResult = false
-					break
+			if !fCheckResult {
+				for _, e := range entry.Tx.GetIns() {
+					mempoolDuplicate.FetchCoin(e.PreviousOutPoint)
 				}
+				fCheckResult = ltx.CheckInputsMoney(entry.Tx, mempoolDuplicate,
+					spentHeight) == nil
 			}
 			if !fCheckResult {
-				panic("this transaction all parent have spent...")
+				panic("the txentry check failed with utxo set2...")
 			}
-			for _, preout := range entry.Tx.GetAllPreviousOut() {
-				mempoolDuplicate.SpendCoin(&preout)
-			}
-			isCoinBase := entry.Tx.IsCoinBase()
-			for i := 0; i < entry.Tx.GetOutsCount(); i++ {
-				a := outpoint.OutPoint{Hash: entry.Tx.GetHash(), Index: uint32(i)}
-				mempoolDuplicate.AddCoin(&a, utxo.NewCoin(entry.Tx.GetTxOut(i), 1000000, isCoinBase), isCoinBase)
-			}
+			updateCoins(mempoolDuplicate, entry.Tx)
 			stepsSinceLastRemove = 0
 		}
 	}
@@ -357,7 +394,7 @@ func CheckMempool() {
 		}
 	}
 
-	if pool.GetPoolAllTxSize() != checkTotal {
+	if pool.GetPoolAllTxSize(false) != checkTotal {
 		panic("mempool have all transaction size state is incorrect ...")
 	}
 }

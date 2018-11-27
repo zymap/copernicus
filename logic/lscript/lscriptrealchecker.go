@@ -2,9 +2,11 @@ package lscript
 
 import (
 	"encoding/hex"
+	"github.com/copernet/copernicus/crypto"
 	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/model/script"
 	"github.com/copernet/copernicus/model/tx"
+	"github.com/copernet/copernicus/util"
 	"github.com/copernet/copernicus/util/amount"
 )
 
@@ -22,11 +24,11 @@ func (src *RealChecker) CheckSig(transaction *tx.Tx, signature []byte, pubKey []
 		return false, err
 	}
 	signature = signature[:len(signature)-1]
-	//log.Debug("CheckSig: txid: %s, txSigHash: %s, signature: %s, pubkey: %s", txHash.String(),
-	//	txSigHash.String(), hex.EncodeToString(signature), hex.EncodeToString(pubKey))
 	fOk := tx.CheckSig(txSigHash, signature, pubKey)
-	log.Debug("CheckSig: txid: %s, txSigHash: %s, signature: %s, pubkey: %s, result: %v", transaction.GetHash(),
-		txSigHash, hex.EncodeToString(signature), hex.EncodeToString(pubKey), fOk)
+	log.Debug("CheckSig: txid: %s, txSigHash: %s, signature: %s, pubkey: %s, flags: %d, result: %v",
+		transaction.GetHash().String(), txSigHash.String(), hex.EncodeToString(signature),
+		hex.EncodeToString(pubKey), flags, fOk)
+
 	//if !fOk {
 	//	panic("CheckSig failed")
 	//}
@@ -100,6 +102,10 @@ func (src *RealChecker) CheckSequence(sequence int64, txToSequence int64, txVers
 		return false
 	}
 	return true
+}
+
+func (src *RealChecker) VerifySignature(vchSig []byte, pubKey *crypto.PublicKey, sigHash *util.Hash) (bool, error) {
+	return pubKey.Verify(sigHash, vchSig)
 }
 
 func NewScriptRealChecker() *RealChecker {

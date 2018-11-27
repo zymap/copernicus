@@ -1,6 +1,9 @@
 package utxo
 
 import (
+	"errors"
+	"github.com/copernet/copernicus/util/amount"
+	"github.com/stretchr/testify/assert"
 	"testing"
 
 	"bytes"
@@ -14,7 +17,7 @@ import (
 func TestCoin(t *testing.T) {
 	script1 := script.NewEmptyScript()
 	txout1 := txout.NewTxOut(2, script1)
-	c := NewCoin(txout1, 10, false)
+	c := NewFreshCoin(txout1, 10, false)
 	gto := c.GetTxOut()
 	gh := c.GetHeight()
 	ga := c.GetAmount()
@@ -64,7 +67,7 @@ func TestCoin(t *testing.T) {
 
 	script2 := script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL})
 	txout2 := txout.NewTxOut(3, script2)
-	c2 := NewCoin(txout2, 10, false)
+	c2 := NewFreshCoin(txout2, 10, false)
 
 	if c2.GetTxOut() != *txout2 || c2.GetHeight() != 10 {
 		t.Error("get coin value is failed, please check..")
@@ -98,7 +101,7 @@ func TestCoinSec(t *testing.T) {
 	script3 := script.NewScriptRaw([]byte{opcodes.OP_2DROP, opcodes.OP_2MUL})
 	txout3 := txout.NewTxOut(4, script3)
 
-	c3 := NewCoin(txout3, 1000, true)
+	c3 := NewFreshCoin(txout3, 1000, true)
 	spew.Dump("the coin  is: %v \n ", c3)
 
 	w := bytes.NewBuffer(nil)
@@ -125,4 +128,49 @@ func TestMempoolCoin(t *testing.T) {
 	if !coinM.IsMempoolCoin() {
 		t.Errorf("coinM should be a mempool coin")
 	}
+}
+
+func TestFreshCoinState(t *testing.T) {
+	coin := NewFreshCoin(txout.NewTxOut(amount.Amount(1), script.NewEmptyScript()), 1, true)
+
+	assert.True(t, coin.isCoinBase)
+	assert.True(t, coin.fresh)
+	assert.False(t, coin.dirty)
+}
+
+func Test_do_not_serialize_spent_coin(t *testing.T) {
+	scriptPK := script.NewScriptRaw([]byte{opcodes.OP_TRUE})
+	coin := NewFreshCoin(txout.NewTxOut(amount.Amount(1), scriptPK), 1, true)
+	coin.Clear()
+
+	buf := bytes.NewBuffer(nil)
+	err := coin.Serialize(buf)
+
+	assert.Equal(t, errors.New("already spent"), err)
+}
+
+type MockWriter struct {
+}
+
+func (mw *MockWriter) Write(p []byte) (size int, err error) {
+	return 0, errors.New("EOF")
+}
+
+func Test_can_return_serialize_failure(t *testing.T) {
+	scriptPK := script.NewScriptRaw([]byte{opcodes.OP_TRUE})
+	coin := NewFreshCoin(txout.NewTxOut(amount.Amount(1), scriptPK), 1, true)
+
+	writer := &MockWriter{}
+	err := coin.Serialize(writer)
+
+	assert.Equal(t, errors.New("EOF"), err)
+}
+
+func Test_test_unserialize_failure(t *testing.T) {
+	coin := NewFreshEmptyCoin()
+
+	buf := bytes.NewBuffer(nil)
+	err := coin.Unserialize(buf)
+
+	assert.Equal(t, errors.New("EOF"), err)
 }

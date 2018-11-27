@@ -2,11 +2,11 @@ package rpc
 
 import (
 	"fmt"
+	"github.com/copernet/copernicus/conf"
 	"strconv"
 
 	"github.com/copernet/copernicus/model/consensus"
 	"github.com/copernet/copernicus/rpc/btcjson"
-	"github.com/copernet/copernicus/service/mining"
 )
 
 var abcHandlers = map[string]commandHandler{
@@ -16,7 +16,7 @@ var abcHandlers = map[string]commandHandler{
 
 func handleGetExcessiveBlock(s *Server, cmd interface{}, closeChan <-chan struct{}) (interface{}, error) {
 	return &btcjson.ExcessiveBlockSizeResult{
-		ExcessiveBlockSize: mining.GetBlockSize(),
+		ExcessiveBlockSize: conf.Cfg.Excessiveblocksize,
 	}, nil
 }
 
@@ -32,7 +32,7 @@ func handleSetExcessiveBlock(s *Server, cmd interface{}, closeChan <-chan struct
 	}
 
 	// Set the new max block size.
-	mining.SetBlockSize(c.BlockSize)
+	conf.Cfg.Excessiveblocksize = c.BlockSize
 
 	// settingsToUserAgentString();
 	return "Excessive Block set to " + fmt.Sprintf("%d", c.BlockSize) + " bytes", nil

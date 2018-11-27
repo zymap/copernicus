@@ -2,6 +2,7 @@ package disk
 
 import (
 	"fmt"
+	"github.com/stretchr/testify/assert"
 	"io/ioutil"
 	"math"
 	"os"
@@ -148,7 +149,7 @@ func TestUndoWRToDisk(t *testing.T) {
 	//init coin
 	script1 := script.NewEmptyScript()
 	txout1 := txout.NewTxOut(2, script1)
-	c := utxo.NewCoin(txout1, 10, false)
+	c := utxo.NewFreshCoin(txout1, 10, false)
 	txundo.SetUndoCoins([]*utxo.Coin{c})
 	blkUndo1.AddTxUndo(txundo)
 	pos1 := block.NewDiskBlockPos(11, 12)
@@ -312,7 +313,7 @@ func TestFlushStateToDisk(t *testing.T) {
 	outpoint1 := outpoint.OutPoint{Hash: *hash1, Index: 0}
 	script1 := script.NewScriptRaw([]byte{opcodes.OP_11, opcodes.OP_EQUAL})
 	txout1 := txout.NewTxOut(3, script1)
-	coin1 := utxo.NewCoin(txout1, 1, false)
+	coin1 := utxo.NewFreshCoin(txout1, 1, false)
 
 	necm.AddCoin(&outpoint1, coin1, false)
 	guci := utxo.GetUtxoCacheInstance()
@@ -405,6 +406,74 @@ func TestAllocateFileRange(t *testing.T) {
 	}
 }
 
+func TestGetBlkFiles(t *testing.T) {
+	testDir, err := initTestEnv(t)
+	assert.Nil(t, err)
+
+	defer os.RemoveAll(testDir)
+
+	blkList := []string{
+		"blk00000.dat",
+		"blk00001.dat",
+	}
+
+	dirBlocks := filepath.Join(testDir, "blocks")
+	err = os.Mkdir(dirBlocks, 0777)
+	assert.Nil(t, err)
+
+	for _, filename := range blkList {
+		_, err = os.Create(filepath.Join(dirBlocks, filename))
+		assert.Nil(t, err)
+	}
+
+	blkfiles, err := GetBlkFiles()
+	assert.Nil(t, err)
+	for i, file := range blkfiles {
+		fileName := filepath.Base(file)
+		assert.Equal(t, blkList[i], fileName)
+	}
+}
+
 func TestCleanupBlockRevFiles(t *testing.T) {
+	testDir, err := initTestEnv(t)
+	assert.Nil(t, err)
+
+	defer os.RemoveAll(testDir)
+
+	dirBlocks := filepath.Join(testDir, "blocks")
+	err = os.Mkdir(dirBlocks, 0777)
+	assert.Nil(t, err)
+
+	// test delete blk file that index not continuous
+	blkList := []string{
+		"blk00000.dat",
+		"blk00001.dat",
+		"blk00003.dat",
+	}
+
+	for _, filename := range blkList {
+		_, err = os.Create(filepath.Join(dirBlocks, filename))
+		assert.Nil(t, err)
+	}
+
+	revList := []string{
+		"rev00000.dat",
+		"rev00001.dat",
+	}
+
+	for _, filename := range revList {
+		_, err = os.Create(filepath.Join(dirBlocks, filename))
+		assert.Nil(t, err)
+	}
+
 	CleanupBlockRevFiles()
+
+	files, err := ioutil.ReadDir(dirBlocks)
+	assert.Nil(t, err)
+
+	for _, file := range files {
+		is := isBlkFile(file.Name())
+		assert.True(t, is)
+	}
+
 }

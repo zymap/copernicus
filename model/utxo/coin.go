@@ -64,7 +64,6 @@ func (coin *Coin) DeepCopy() *Coin {
 	outScript := coin.txOut.GetScriptPubKey()
 	if coin.txOut.GetScriptPubKey() != nil {
 		newOutScript := script.NewScriptRaw(outScript.GetData())
-		//newOutScript.ParsedOpCodes = outScript.ParsedOpCodes
 		newOut := txout.NewTxOut(coin.txOut.GetValue(), newOutScript)
 		newCoin.txOut = *newOut
 	}
@@ -108,13 +107,13 @@ func (coin *Coin) Unserialize(r io.Reader) error {
 	return tc.Unserialize(r)
 }
 
-// NewCoin creates an confirmed coin
-func NewCoin(out *txout.TxOut, height int32, isCoinBase bool) *Coin {
-
+// NewFreshCoin creates an confirmed coin
+func NewFreshCoin(out *txout.TxOut, height int32, isCoinBase bool) *Coin {
 	return &Coin{
 		txOut:      *out,
 		height:     height,
 		isCoinBase: isCoinBase,
+		fresh:      true,
 	}
 }
 
@@ -123,14 +122,23 @@ func NewMempoolCoin(out *txout.TxOut) *Coin {
 	return &Coin{
 		txOut:         *out,
 		isMempoolCoin: true,
+		fresh:         true,
 	}
 }
 
 func NewEmptyCoin() *Coin {
-
 	return &Coin{
 		txOut:      *txout.NewTxOut(0, nil),
 		height:     0,
 		isCoinBase: false,
+	}
+}
+
+func NewFreshEmptyCoin() *Coin {
+	return &Coin{
+		txOut:      *txout.NewTxOut(0, nil),
+		height:     0,
+		isCoinBase: false,
+		fresh:      true,
 	}
 }

@@ -2,6 +2,7 @@ package conf
 
 import (
 	"fmt"
+	"github.com/stretchr/testify/assert"
 	"io/ioutil"
 	"math/rand"
 	"net"
@@ -163,20 +164,37 @@ func TestExistDataDir(t *testing.T) {
 	}
 	defer os.Remove(fileTrue)
 
-	if !ExistDataDir(fileTrue) {
+	if !FileExists(fileTrue) {
 		t.Errorf("the fileTrue file should exist!")
 	}
 
-	if ExistDataDir(fileFalse) {
+	if FileExists(fileFalse) {
 		t.Errorf("the fileFalse file shouldn't exist!")
 	}
 }
 
-func getDefaultConfiguration(dataDir string, testNet, regTestNet bool) *Configuration {
+type defaultArgs struct {
+	dataDir             string
+	testNet             bool
+	regTestNet          bool
+	whiteList           []*net.IPNet
+	UtxoHashStartHeight int32
+	UtxoHashEndHeight   int32
+	Excessiveblocksize  uint64
+	Limitancestorcount  int
+}
+
+func getDefaultConfiguration(args defaultArgs) *Configuration {
+	dataDir := args.dataDir
+	testNet := args.testNet
+	regTestNet := args.regTestNet
+	whiteList := args.whiteList
 	defaultDataDir := AppDataDir(defaultDataDirname, false)
+	defaultExcessiveblocksize := args.Excessiveblocksize
 
 	return &Configuration{
-		DataDir: dataDir,
+		Excessiveblocksize: defaultExcessiveblocksize,
+		DataDir:            dataDir,
 		RPC: struct {
 			RPCListeners         []string
 			RPCUser              string
@@ -194,23 +212,27 @@ func getDefaultConfiguration(dataDir string, testNet, regTestNet bool) *Configur
 			RPCKey:  filepath.Join(defaultDataDir, "rpc.key"),
 		},
 		Mempool: struct {
-			MinFeeRate           int64 //
-			LimitAncestorCount   int   // Default for -limitancestorcount, max number of in-mempool ancestors
-			LimitAncestorSize    int   // Default for -limitancestorsize, maximum kilobytes of tx + all in-mempool ancestors
-			LimitDescendantCount int   // Default for -limitdescendantcount, max number of in-mempool descendants
-			LimitDescendantSize  int   // Default for -limitdescendantsize, maximum kilobytes of in-mempool descendants
-			MaxPoolSize          int64 `default:"300000000"` // Default for MaxPoolSize, maximum megabytes of mempool memory usage
-			MaxPoolExpiry        int   // Default for -mempoolexpiry, expiration time for mempool transactions in hours
+			MinFeeRate           int64  //
+			LimitAncestorCount   int    // Default for -limitancestorcount, max number of in-mempool ancestors
+			LimitAncestorSize    int    // Default for -limitancestorsize, maximum kilobytes of tx + all in-mempool ancestors
+			LimitDescendantCount int    // Default for -limitdescendantcount, max number of in-mempool descendants
+			LimitDescendantSize  int    // Default for -limitdescendantsize, maximum kilobytes of in-mempool descendants
+			MaxPoolSize          int64  `default:"300000000"` // Default for MaxPoolSize, maximum megabytes of mempool memory usage
+			MaxPoolExpiry        int    `default:"336"`       // Default for -mempoolexpiry, expiration time for mempool transactions in hours
+			CheckFrequency       uint64 `default:"4294967296"`
 		}{
-			MaxPoolSize: 300000000,
+			MaxPoolSize:        300000000,
+			CheckFrequency:     4294967296,
+			LimitAncestorCount: 50000,
+			MaxPoolExpiry:      336,
 		},
 		P2PNet: struct {
 			ListenAddrs         []string `validate:"require" default:"1234"`
 			MaxPeers            int      `default:"128"`
-			TargetOutbound      int      `default:"8"`
+			TargetOutbound      int      `default:"64"`
 			ConnectPeersOnStart []string
-			DisableBanning      bool `default:"true"`
-			BanThreshold        uint32
+			DisableBanning      bool   `default:"true"`
+			BanThreshold        uint32 `default:"100"`
 			TestNet             bool
 			RegTest             bool `default:"false"`
 			SimNet              bool
@@ -230,8 +252,9 @@ func getDefaultConfiguration(dataDir string, testNet, regTestNet bool) *Configur
 		}{
 			ListenAddrs:    []string{"1234"},
 			MaxPeers:       128,
-			TargetOutbound: 8,
+			TargetOutbound: 64,
 			DisableBanning: true,
+			BanThreshold:   100,
 			DisableListen:  true,
 			BlocksOnly:     false,
 			DisableRPC:     false,
@@ -240,6 +263,7 @@ func getDefaultConfiguration(dataDir string, testNet, regTestNet bool) *Configur
 			NoOnion:        true,
 			TestNet:        testNet,
 			RegTest:        regTestNet,
+			Whitelists:     whiteList,
 		},
 		Protocol: struct {
 			NoPeerBloomFilters bool `default:"true"`
@@ -250,14 +274,14 @@ func getDefaultConfiguration(dataDir string, testNet, regTestNet bool) *Configur
 			MaxDatacarrierBytes uint `default:"223"`
 			IsBareMultiSigStd   bool `default:"true"`
 			//use promiscuousMempoolFlags to make more or less check of script, the type of value is uint
-			PromiscuousMempoolFlags string `default:"0"`
-			Par                     int    `default:"32"`
+			PromiscuousMempoolFlags string
+			Par                     int `default:"32"`
 		}{
 			AcceptDataCarrier:       true,
 			MaxDatacarrierBytes:     223,
 			IsBareMultiSigStd:       true,
-			PromiscuousMempoolFlags: "0",
-			Par: 32,
+			PromiscuousMempoolFlags: "",
+			Par:                     32,
 		},
 		TxOut: struct {
 			DustRelayFee int64 `default:"83"`
@@ -268,17 +292,15 @@ func getDefaultConfiguration(dataDir string, testNet, regTestNet bool) *Configur
 			UtxoHashEndHeight   int32 `default:"-1"`
 		}{
 			AssumeValid:         "",
-			UtxoHashStartHeight: -1,
-			UtxoHashEndHeight:   -1,
+			UtxoHashStartHeight: args.UtxoHashStartHeight,
+			UtxoHashEndHeight:   args.UtxoHashEndHeight,
 		},
 		Mining: struct {
 			BlockMinTxFee int64  // default DefaultBlockMinTxFee
 			BlockMaxSize  uint64 // default DefaultMaxGeneratedBlockSize
-			BlockVersion  int32  `default:"-1"`
 			Strategy      string `default:"ancestorfeerate"` // option:ancestorfee/ancestorfeerate
 		}{
-			BlockVersion: -1,
-			Strategy:     "ancestorfeerate",
+			Strategy: "ancestorfeerate",
 		},
 		PProf: struct {
 			IP   string `default:"localhost"`
@@ -288,15 +310,22 @@ func getDefaultConfiguration(dataDir string, testNet, regTestNet bool) *Configur
 			SimNet       bool
 			ConnectPeers []string
 		}{SimNet: false},
-		BlockIndex: struct{ CheckBlockIndex bool }{CheckBlockIndex: regTestNet},
+		BlockIndex: struct {
+			CheckBlockIndex bool
+		}{CheckBlockIndex: regTestNet},
+		Wallet: struct {
+			Enable              bool `default:"false"`
+			Broadcast           bool `default:"false"`
+			SpendZeroConfChange bool `default:"true"`
+		}{Enable: false, Broadcast: false, SpendZeroConfChange: true},
 	}
 }
 
 func createTmpFile() {
 	confFile := os.Getenv("GOPATH") + "/src/" + defaultProjectDir + "/conf/"
-	CopyFile(confFile+"conf.yml", confFile+"conf.yml.tmp")
-	os.Remove(confFile + "conf.yml")
-	f, err := os.Create(confFile + "conf.yml")
+	CopyFile(confFile+"bitcoincash.yml", confFile+"bitcoincash.yml.tmp")
+	os.Remove(confFile + "bitcoincash.yml")
+	f, err := os.Create(confFile + "bitcoincash.yml")
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -305,9 +334,38 @@ func createTmpFile() {
 
 func revert() {
 	confFile := os.Getenv("GOPATH") + "/src/" + defaultProjectDir + "/conf/"
-	os.Remove(confFile + "conf.yml")
-	CopyFile(confFile+"conf.yml.tmp", confFile+"conf.yml")
-	os.Remove(confFile + "conf.yml.tmp")
+	os.Remove(confFile + "bitcoincash.yml")
+	CopyFile(confFile+"bitcoincash.yml.tmp", confFile+"bitcoincash.yml")
+	os.Remove(confFile + "bitcoincash.yml.tmp")
+}
+
+func createNet(nets []string) []*net.IPNet {
+	netReuslt := make([]*net.IPNet, 0)
+	for _, addr := range nets {
+		_, ipnet, err := net.ParseCIDR(addr)
+		if err != nil {
+			ip := net.ParseIP(addr)
+			if ip == nil {
+				continue
+			}
+
+			var bits int
+			if ip.To4() == nil {
+				bits = 128
+			} else {
+				bits = 32
+			}
+
+			ipnet = &net.IPNet{
+				IP:   ip,
+				Mask: net.CIDRMask(bits, bits),
+			}
+		}
+
+		netReuslt = append(netReuslt, ipnet)
+	}
+
+	return netReuslt
 }
 
 func TestInitConfig2(t *testing.T) {
@@ -315,22 +373,69 @@ func TestInitConfig2(t *testing.T) {
 		in   []string
 		want *Configuration
 	}{
-		{[]string{"--datadir=/tmp/Coper"}, getDefaultConfiguration("/tmp/Coper", false, false)},
-		{[]string{"--datadir=/tmp/Coper", "--testnet"}, getDefaultConfiguration("/tmp/Coper/testnet", true, false)},
-		{[]string{"--datadir=/tmp/Coper", "--regtest"}, getDefaultConfiguration("/tmp/Coper/regtest", false, true)},
+		{[]string{"--datadir=/tmp/Coper"},
+			getDefaultConfiguration(defaultArgs{
+				dataDir:             "/tmp/Coper",
+				testNet:             false,
+				regTestNet:          false,
+				whiteList:           nil,
+				UtxoHashStartHeight: -1,
+				UtxoHashEndHeight:   -1,
+				Excessiveblocksize:  32000000,
+			})},
+		{[]string{"--datadir=/tmp/Coper", "--whitelist=127.0.0.1/24"},
+			getDefaultConfiguration(defaultArgs{
+				dataDir:             "/tmp/Coper",
+				testNet:             false,
+				regTestNet:          false,
+				whiteList:           createNet([]string{"127.0.0.1/24"}),
+				UtxoHashStartHeight: -1,
+				UtxoHashEndHeight:   -1,
+				Excessiveblocksize:  32000000,
+			})},
+		{[]string{"--datadir=/tmp/Coper", "--whitelist="},
+			getDefaultConfiguration(defaultArgs{
+				dataDir:             "/tmp/Coper",
+				testNet:             false,
+				regTestNet:          false,
+				whiteList:           createNet([]string{""}),
+				UtxoHashStartHeight: -1,
+				UtxoHashEndHeight:   -1,
+				Excessiveblocksize:  32000000,
+			})},
+		{[]string{"--datadir=/tmp/Coper", "--whitelist=127.0.0.1"},
+			getDefaultConfiguration(defaultArgs{
+				dataDir:             "/tmp/Coper",
+				testNet:             false,
+				regTestNet:          false,
+				whiteList:           createNet([]string{"127.0.0.1"}),
+				UtxoHashStartHeight: -1,
+				UtxoHashEndHeight:   -1,
+				Excessiveblocksize:  32000000,
+			})},
+		{[]string{"--datadir=/tmp/Coper", "--utxohashstartheight=0", "--utxohashendheight=1"},
+			getDefaultConfiguration(defaultArgs{
+				dataDir:             "/tmp/Coper",
+				testNet:             false,
+				regTestNet:          false,
+				whiteList:           nil,
+				UtxoHashStartHeight: 0,
+				UtxoHashEndHeight:   1,
+				Excessiveblocksize:  32000000,
+			})},
 	}
 	createTmpFile()
 	defer os.RemoveAll("/tmp/Coper")
 	defer revert()
 
-	for i, v := range tests {
+	for _, v := range tests {
 		value := v
 		result := InitConfig(value.in)
-		fmt.Println(*result)
-		fmt.Println(*value.want)
-		if !reflect.DeepEqual(result, value.want) {
-			t.Errorf(" %d it not expect", i)
-		}
+
+		assert.Equal(t, value.want, result)
+		//if !reflect.DeepEqual(result, value.want) {
+		//	t.Errorf(" %d it not expect", i)
+		//}
 	}
 }
 

@@ -1,16 +1,16 @@
 package mining
 
 import (
-	"bytes"
-	"encoding/binary"
 	"math"
+	"sort"
 	"strconv"
-	"strings"
-	"sync"
 
 	"github.com/copernet/copernicus/conf"
+	"github.com/copernet/copernicus/errcode"
 	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/logic/lblock"
+	"github.com/copernet/copernicus/logic/lblockindex"
+	"github.com/copernet/copernicus/logic/lchain"
 	"github.com/copernet/copernicus/logic/ltx"
 	"github.com/copernet/copernicus/model"
 	"github.com/copernet/copernicus/model/block"
@@ -24,15 +24,11 @@ import (
 	"github.com/copernet/copernicus/model/tx"
 	"github.com/copernet/copernicus/model/txin"
 	"github.com/copernet/copernicus/model/txout"
+	"github.com/copernet/copernicus/model/utxo"
 	"github.com/copernet/copernicus/model/versionbits"
 	"github.com/copernet/copernicus/util"
+	"github.com/copernet/copernicus/util/algorithm/mapcontainer"
 	"github.com/copernet/copernicus/util/amount"
-
-	"github.com/copernet/copernicus/logic/lblockindex"
-	"github.com/copernet/copernicus/logic/lchain"
-	"github.com/copernet/copernicus/model/utxo"
-	"github.com/copernet/copernicus/persist"
-	"github.com/google/btree"
 )
 
 const (
@@ -40,7 +36,7 @@ const (
 	// close to full; this is just a simple heuristic to finish quickly if the
 	// mempool has a lot of entries.
 	maxConsecutiveFailures = 1000
-	CoinbaseFlag           = ""
+	CoinbaseFlag           = "copernicus"
 )
 
 // global value for getmininginfo rpc use
@@ -73,7 +69,6 @@ func newBlockTemplate() *BlockTemplate {
 
 // BlockAssembler Generate a new block, without valid proof-of-work
 type BlockAssembler struct {
-	sync.RWMutex
 	bt                    *BlockTemplate
 	maxGeneratedBlockSize uint64
 	blockMinFeeRate       util.FeeRate
@@ -85,15 +80,17 @@ type BlockAssembler struct {
 	height                int32
 	lockTimeCutoff        int64
 	chainParams           *model.BitcoinParams
+	timeSource            *util.MedianTime
 }
 
-func NewBlockAssembler(params *model.BitcoinParams) *BlockAssembler {
+func NewBlockAssembler(params *model.BitcoinParams, ts *util.MedianTime) *BlockAssembler {
 	ba := new(BlockAssembler)
 	ba.bt = newBlockTemplate()
 	ba.chainParams = params
 	v := conf.Cfg.Mining.BlockMinTxFee
 	ba.blockMinFeeRate = *util.NewFeeRate(v) // todo confirm
 	ba.maxGeneratedBlockSize = computeMaxGeneratedBlockSize()
+	ba.timeSource = ts
 	return ba
 }
 
@@ -113,7 +110,12 @@ func (ba *BlockAssembler) testPackage(packageSize uint64, packageSigOps int64, a
 	if blockSizeWithPackage >= ba.maxGeneratedBlockSize {
 		return false
 	}
-	if ba.blockSigOps+uint64(packageSigOps) >= consensus.GetMaxBlockSigOpsCount(blockSizeWithPackage) {
+	maxSigOps, errSig := consensus.GetMaxBlockSigOpsCount(blockSizeWithPackage)
+	if errSig != nil {
+		log.Error("testPackage err :%v", errSig)
+		return false
+	}
+	if ba.blockSigOps+uint64(packageSigOps) >= maxSigOps {
 		return false
 	}
 	return true
@@ -148,19 +150,54 @@ func computeMaxGeneratedBlockSize() uint64 {
 	return maxGeneratedBlockSize
 }
 
+type ByAncsCount []*mempool.TxEntry
+
+func (a ByAncsCount) Len() int      { return len(a) }
+func (a ByAncsCount) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
+func (a ByAncsCount) Less(i, j int) bool {
+	return a[i].SumTxCountWithAncestors < a[j].SumTxCountWithAncestors
+}
+
+type sortTxs []*tx.Tx
+
+func (s sortTxs) Len() int {
+	return len(s)
+}
+func (s sortTxs) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
+}
+func (s sortTxs) Less(i, j int) bool {
+	h1 := s[i].GetHash()
+	h2 := s[j].GetHash()
+	return pow.HashToBig(&h1).Cmp(pow.HashToBig(&h2)) < 0
+}
+
+func sortTxsByAncestorCount(ancestors map[*mempool.TxEntry]struct{}) (result []*mempool.TxEntry) {
+
+	result = make([]*mempool.TxEntry, 0, len(ancestors))
+	for item := range ancestors {
+		result = append(result, item)
+	}
+
+	sort.Sort(ByAncsCount(result))
+	return result
+}
+
 // This transaction selection algorithm orders the mempool based on feerate of a
 // transaction including all unconfirmed ancestors. Since we don't remove
 // transactions from the mempool as we select them for block inclusion, we need
 // an alternate method of updating the feerate of a transaction with its
 // not-yet-selected ancestors as we go.
-func (ba *BlockAssembler) addPackageTxs() int {
+func (ba *BlockAssembler) addPackageTxs(sortRecord map[util.Hash]int) int {
 	descendantsUpdated := 0
 	pool := mempool.GetInstance() // todo use global variable
+	pool.RLock()
+	defer pool.RUnlock()
 	tmpStrategy := *getStrategy()
 
 	consecutiveFailed := 0
 
-	var txSet *btree.BTree
+	var txSet mapcontainer.MapContainer
 	switch tmpStrategy {
 	case sortByFee:
 		txSet = sortedByFeeWithAncestors()
@@ -176,10 +213,12 @@ func (ba *BlockAssembler) addPackageTxs() int {
 
 		switch tmpStrategy {
 		case sortByFee:
-			entry = mempool.TxEntry(txSet.Max().(EntryFeeSort))
+			less, _ := txSet.Max()
+			entry = mempool.TxEntry(less.(EntryFeeSort))
 			txSet.DeleteMax()
 		case sortByFeeRate:
-			entry = mempool.TxEntry(txSet.Max().(EntryAncestorFeeRateSort))
+			less, _ := txSet.Max()
+			entry = mempool.TxEntry(less.(EntryAncestorFeeRateSort))
 			txSet.DeleteMax()
 		}
 		// if inBlock has the item, continue next loop
@@ -226,25 +265,32 @@ func (ba *BlockAssembler) addPackageTxs() int {
 		// add the ancestors of the current item to block
 		noLimit := uint64(math.MaxUint64)
 
-		pool.RLock()
-		ancestors, _ := pool.CalculateMemPoolAncestors(entry.Tx, noLimit, noLimit, noLimit, noLimit, true)
-		pool.RUnlock()
+		mempoolAncestors, _ := pool.CalculateMemPoolAncestors(entry.Tx, noLimit, noLimit, noLimit, noLimit, true)
+		ancestors := make(map[*mempool.TxEntry]struct{})
+		for en := range mempoolAncestors {
+			newentry := *en
+			ancestors[&newentry] = struct{}{}
+		}
 
-		ba.onlyUnconfirmed(ancestors)
 		ancestors[&entry] = struct{}{} // add current item
-		if !ba.testPackageTransactions(ancestors) {
+		ancestorsList := sortTxsByAncestorCount(ancestors)
+		ancestorsList = ba.onlyUnconfirmed(ancestorsList)
+
+		if !ba.testPackageTransactions(ancestorsList) {
 			continue
 		}
 
 		// This transaction will make it in; reset the failed counter.
 		consecutiveFailed = 0
 		addset := make(map[util.Hash]mempool.TxEntry)
-		for add := range ancestors {
-			ba.addToBlock(add)
-			addset[add.Tx.GetHash()] = *add
+
+		for _, item := range ancestorsList {
+			ba.addToBlock(item)
+			sortRecord[item.Tx.GetHash()] = len(ba.bt.TxFees) - 1
+			addset[item.Tx.GetHash()] = *item
 		}
 
-		descendantsUpdated += ba.updatePackagesForAdded(txSet, ancestors)
+		descendantsUpdated += ba.updatePackagesForAdded(txSet, ancestorsList)
 	}
 	return descendantsUpdated
 }
@@ -269,8 +315,6 @@ func (ba *BlockAssembler) CreateNewBlock(scriptPubKey, scriptSig *script.Script)
 	ba.bt.TxSigOpsCount = make([]int, 0, 100000)
 	ba.bt.TxSigOpsCount = append(ba.bt.TxSigOpsCount, -1)
 
-	ba.Lock()
-	defer ba.Unlock()
 	indexPrev := chain.GetInstance().Tip()
 
 	// genesis block
@@ -280,20 +324,42 @@ func (ba *BlockAssembler) CreateNewBlock(scriptPubKey, scriptSig *script.Script)
 		ba.height = indexPrev.Height + 1
 	}
 
-	blkVersion := versionbits.ComputeBlockVersion(indexPrev, model.ActiveNetParams, versionbits.VBCache)
-	ba.bt.Block.Header.Version = int32(blkVersion)
+	ba.bt.Block.Header.Version = versionbits.ComputeBlockVersion()
 	// -regtest only: allow overriding block.nVersion with
 	// -blockversion=N to test forking scenarios
 	if ba.chainParams.MineBlocksOnDemands {
-		if conf.Cfg.Mining.BlockVersion != -1 {
-			ba.bt.Block.Header.Version = conf.Cfg.Mining.BlockVersion
+		if conf.Args.BlockVersion != -1 {
+			ba.bt.Block.Header.Version = conf.Args.BlockVersion
 		}
 	}
-	ba.bt.Block.Header.Time = uint32(util.GetAdjustedTime())
+	ba.bt.Block.Header.Time = uint32(ba.timeSource.AdjustedTime().Unix())
 	ba.maxGeneratedBlockSize = computeMaxGeneratedBlockSize()
-	ba.lockTimeCutoff = indexPrev.GetMedianTimePast()
+	lockTimeCutoff := indexPrev.GetMedianTimePast()
+	if tx.StandardLockTimeVerifyFlags&consensus.LocktimeMedianTimePast != 0 {
+		ba.lockTimeCutoff = lockTimeCutoff
+	} else {
+		ba.lockTimeCutoff = int64(ba.bt.Block.GetBlockHeader().Time)
+	}
+	sortRecord := make(map[util.Hash]int)
+	descendantsUpdated := ba.addPackageTxs(sortRecord)
 
-	descendantsUpdated := ba.addPackageTxs()
+	if model.IsMagneticAnomalyEnabled(indexPrev.GetMedianTimePast()) {
+		// If magnetic anomaly is enabled, we make sure transaction are
+		// canonically ordered.
+		sort.Sort(sortTxs(ba.bt.Block.Txs[1:]))
+		sortTxFees := make([]amount.Amount, len(ba.bt.TxFees))
+		sortTxFees[0] = ba.bt.TxFees[0]
+		sortTxSigOpCosts := make([]int, len(ba.bt.TxSigOpsCount))
+		sortTxSigOpCosts[0] = ba.bt.TxSigOpsCount[0]
+		for i, tmpTx := range ba.bt.Block.Txs[1:] {
+			offset := sortRecord[tmpTx.GetHash()]
+			sortTxFees[i+1] = ba.bt.TxFees[offset]
+			sortTxSigOpCosts[i+1] = ba.bt.TxSigOpsCount[offset]
+		}
+
+		ba.bt.TxFees = sortTxFees
+		ba.bt.TxSigOpsCount = sortTxSigOpCosts
+	}
 	time1 := util.GetMockTimeInMicros()
 
 	// record last mining info for getmininginfo rpc using
@@ -306,9 +372,15 @@ func (ba *BlockAssembler) CreateNewBlock(scriptPubKey, scriptSig *script.Script)
 	outPoint := outpoint.OutPoint{Hash: util.HashZero, Index: 0xffffffff}
 
 	coinbaseTx.AddTxIn(txin.NewTxIn(&outPoint, scriptSig, 0xffffffff))
+	coinbaseSerializeSize := coinbaseTx.SerializeSize()
+	if coinbaseSerializeSize < consensus.MinTxSize {
+		byteLen := consensus.MinTxSize - coinbaseSerializeSize - 1
+		scriptSig.PushData(make([]byte, byteLen))
+	}
 
 	// value represents total reward(fee and block generate reward)
-	value := ba.fees + GetBlockSubsidy(ba.height, ba.chainParams)
+
+	value := ba.fees + model.GetBlockSubsidy(ba.height, ba.chainParams)
 	coinbaseTx.AddTxOut(txout.NewTxOut(value, scriptPubKey))
 	ba.bt.Block.Txs[0] = coinbaseTx
 	ba.bt.TxFees[0] = -1 * ba.fees // coinbase's fee item is equal to tx fee sum for negative value
@@ -328,11 +400,11 @@ func (ba *BlockAssembler) CreateNewBlock(scriptPubKey, scriptSig *script.Script)
 	ba.bt.Block.Header.Bits = p.GetNextWorkRequired(indexPrev, &ba.bt.Block.Header, ba.chainParams)
 	ba.bt.Block.Header.Nonce = 0
 
-	ba.bt.TxSigOpsCount[0] = ba.bt.Block.Txs[0].GetSigOpCountWithoutP2SH()
+	ba.bt.TxSigOpsCount[0] = ba.bt.Block.Txs[0].GetSigOpCountWithoutP2SH(uint32(script.StandardScriptVerifyFlags))
 
 	//check the validity of the block
-	if !TestBlockValidity(ba.bt.Block, indexPrev) {
-		log.Error("CreateNewBlock: TestBlockValidity failed.")
+	if err := TestBlockValidity(ba.bt.Block, indexPrev, false, false); err != nil {
+		log.Error("CreateNewBlock: TestBlockValidity failed, block is:%v, indexPrev:%v, err:%v", ba.bt.Block, indexPrev, err)
 		return nil
 	}
 
@@ -344,21 +416,23 @@ func (ba *BlockAssembler) CreateNewBlock(scriptPubKey, scriptSig *script.Script)
 	return ba.bt
 }
 
-func (ba *BlockAssembler) onlyUnconfirmed(entrySet map[*mempool.TxEntry]struct{}) {
-	for entry := range entrySet {
-		if _, ok := ba.inBlock[entry.Tx.GetHash()]; ok {
-			delete(entrySet, entry)
+func (ba *BlockAssembler) onlyUnconfirmed(entryList []*mempool.TxEntry) []*mempool.TxEntry {
+	result := make([]*mempool.TxEntry, 0)
+	for _, entry := range entryList {
+		if _, ok := ba.inBlock[entry.Tx.GetHash()]; !ok {
+			result = append(result, entry)
 		}
 	}
+	return result
 }
 
 // Perform transaction-level checks before adding to block:
 // - transaction finality (locktime)
 // - serialized size (in case -blockmaxsize is in use)
-func (ba *BlockAssembler) testPackageTransactions(entrySet map[*mempool.TxEntry]struct{}) bool {
+func (ba *BlockAssembler) testPackageTransactions(entrySet []*mempool.TxEntry) bool {
 	potentialBlockSize := ba.blockSize
-	for entry := range entrySet {
-		err := ltx.ContextualCheckTransaction(entry.Tx, ba.height, ba.lockTimeCutoff)
+	for _, entry := range entrySet {
+		err := ltx.ContextualCheckTransaction(entry.Tx, ba.height, ba.lockTimeCutoff, ba.lockTimeCutoff)
 		if err != nil {
 			return false
 		}
@@ -372,14 +446,15 @@ func (ba *BlockAssembler) testPackageTransactions(entrySet map[*mempool.TxEntry]
 	return true
 }
 
-func (ba *BlockAssembler) updatePackagesForAdded(txSet *btree.BTree, alreadyAdded map[*mempool.TxEntry]struct{}) int {
+func (ba *BlockAssembler) updatePackagesForAdded(txSet mapcontainer.MapContainer, alreadyAdded []*mempool.TxEntry) int {
 	descendantUpdate := 0
 	mpool := mempool.GetInstance()
 	tmpStrategy := *getStrategy()
 
-	for entry := range alreadyAdded {
+	for _, entry := range alreadyAdded {
 		descendants := make(map[*mempool.TxEntry]struct{})
 		mpool.CalculateDescendants(entry, descendants)
+
 		// Insert all descendants (not yet in block) into the modified set.
 		// use reflect function if there are so many strategies
 		for desc := range descendants {
@@ -390,9 +465,9 @@ func (ba *BlockAssembler) updatePackagesForAdded(txSet *btree.BTree, alreadyAdde
 				// remove the old one
 				txSet.Delete(item)
 				// update origin data
-				desc.SumTxSizeWitAncestors -= entry.SumTxSizeWitAncestors
-				desc.SumTxFeeWithAncestors -= entry.SumTxFeeWithAncestors
-				desc.SumTxSigOpCountWithAncestors -= entry.SumTxSigOpCountWithAncestors
+				item.SumTxSizeWitAncestors -= entry.SumTxSizeWitAncestors
+				item.SumTxFeeWithAncestors -= entry.SumTxFeeWithAncestors
+				item.SumTxSigOpCountWithAncestors -= entry.SumTxSigOpCountWithAncestors
 				// insert the modified one
 				txSet.ReplaceOrInsert(item)
 			case sortByFeeRate:
@@ -400,9 +475,9 @@ func (ba *BlockAssembler) updatePackagesForAdded(txSet *btree.BTree, alreadyAdde
 				// remove the old one
 				txSet.Delete(item)
 				// update origin data
-				desc.SumTxSizeWitAncestors -= entry.SumTxSizeWitAncestors
-				desc.SumTxFeeWithAncestors -= entry.SumTxFeeWithAncestors
-				desc.SumTxSigOpCountWithAncestors -= entry.SumTxSigOpCountWithAncestors
+				item.SumTxSizeWitAncestors -= entry.SumTxSizeWitAncestors
+				item.SumTxFeeWithAncestors -= entry.SumTxFeeWithAncestors
+				item.SumTxSigOpCountWithAncestors -= entry.SumTxSigOpCountWithAncestors
 				// insert the modified one
 				txSet.ReplaceOrInsert(item)
 			}
@@ -412,32 +487,18 @@ func (ba *BlockAssembler) updatePackagesForAdded(txSet *btree.BTree, alreadyAdde
 }
 
 func CoinbaseScriptSig(extraNonce uint) *script.Script {
-	// TODO lack of lscript builder to construct script conveniently<lscript>
-	buf := bytes.NewBuffer(nil)
-	bytesEight := make([]byte, 8)
+	scriptSig := script.NewEmptyScript()
 
 	height := uint64(chain.GetInstance().Tip().Height + 1)
-	binary.LittleEndian.PutUint64(bytesEight, height)
-	buf.Write(bytesEight)
+	heightNum := script.NewScriptNum(int64(height))
+	scriptSig.PushScriptNum(heightNum)
 
-	///TODO: after add wallet,remove this. fill the sctiptSig in case generate same block
-	if model.ActiveNetParams.Name == model.RegressionNetParams.Name {
-		for _, str := range conf.Cfg.P2PNet.UserAgentComments {
-			if strings.Contains(str, "testnode") {
-				testnode, _ := strconv.Atoi(str[8:])
-				binary.LittleEndian.PutUint64(bytesEight, uint64(testnode))
-				buf.Write(bytesEight)
-			}
-		}
-	}
+	extraNonceNum := script.NewScriptNum(int64(extraNonce))
+	scriptSig.PushScriptNum(extraNonceNum)
 
-	binary.LittleEndian.PutUint64(bytesEight, uint64(extraNonce))
-	buf.Write(bytesEight)
+	scriptSig.PushData(append(getExcessiveBlockSizeSig(), []byte(CoinbaseFlag)...))
 
-	buf.Write(getExcessiveBlockSizeSig())
-	buf.Write([]byte(CoinbaseFlag))
-
-	return script.NewScriptRaw(buf.Bytes())
+	return scriptSig
 }
 
 // This function convert MaxBlockSize from byte to
@@ -493,31 +554,15 @@ func UpdateTime(bk *block.Block, indexPrev *blockindex.BlockIndex) int64 {
 	return newTime - oldTime
 }
 
-func GetBlockSubsidy(height int32, params *model.BitcoinParams) amount.Amount {
-	halvings := height / params.SubsidyReductionInterval
-	// Force block reward to zero when right shift is undefined.
-	if halvings >= 64 {
-		return 0
-	}
-
-	nSubsidy := amount.Amount(50 * util.COIN)
-	// Subsidy is cut in half every 210,000 blocks which will occur
-	// approximately every 4 years.
-	return amount.Amount(uint(nSubsidy) >> uint(halvings))
-}
-
-func TestBlockValidity(block *block.Block, indexPrev *blockindex.BlockIndex) bool {
-	persist.CsMain.Lock()
-	defer persist.CsMain.Unlock()
-
+func TestBlockValidity(block *block.Block, indexPrev *blockindex.BlockIndex, checkHeader bool, checkMerlke bool) (err error) {
 	if !(indexPrev != nil && indexPrev == chain.GetInstance().Tip()) {
-		log.Error("TestBlockValidity(): error")
-		return false
+		log.Error("TestBlockValidity(): indexPrev:%v, chain tip:%v.", indexPrev, chain.GetInstance().Tip())
+		return errcode.NewError(errcode.RejectInvalid, "indexPrev is not the chain tip")
 	}
 
-	if !lblockindex.CheckIndexAgainstCheckpoint(indexPrev) {
-		log.Error("mining: CheckIndexAgainstCheckpoint() failed, please check.")
-		return false
+	if err = lblockindex.CheckIndexAgainstCheckpoint(indexPrev); err != nil {
+		log.Error("TestBlockValidity(): check index against check point failed, indexPrev:%v.", indexPrev)
+		return err
 	}
 
 	coinMap := utxo.NewEmptyCoinsMap()
@@ -528,25 +573,25 @@ func TestBlockValidity(block *block.Block, indexPrev *blockindex.BlockIndex) boo
 	indexDummy.Height = indexPrev.Height + 1
 
 	// NOTE: CheckBlockHeader is called by CheckBlock
-	if !lblock.ContextualCheckBlockHeader(&blkHeader, indexPrev, util.GetAdjustedTime()) {
-		log.Error("TestBlockValidity(): Consensus::ContextualCheckBlockHeader failed, please check.")
-		return false
+	if err := lblock.ContextualCheckBlockHeader(&blkHeader, indexPrev, util.GetAdjustedTime()); err != nil {
+		log.Error("TestBlockValidity():ContextualCheckBlockHeader failed, blkHeader:%v, indexPrev:%v.", blkHeader, indexPrev)
+		return err
 	}
 
-	if err := lblock.CheckBlock(block, false, false); err != nil {
-		log.Error("TestBlockValidity(): Consensus::CheckBlock failed: %v", err)
-		return false
+	if err := lblock.CheckBlock(block, checkHeader, checkMerlke); err != nil {
+		log.Error("TestBlockValidity(): check block:%v error: %v,", block, err)
+		return err
 	}
 
 	if err := lblock.ContextualCheckBlock(block, indexPrev); err != nil {
-		log.Error("TestBlockValidity(): Consensus::ContextualCheckBlock failed: %v", err)
-		return false
+		log.Error("TestBlockValidity(): contextual check block:%v, indexPrev:%v error: %v", block, indexPrev, err)
+		return err
 	}
 
 	if err := lchain.ConnectBlock(block, indexDummy, coinMap, true); err != nil {
-		log.Error("trying to connect to the block failed:%v", err)
-		return false
+		log.Error("trying to connect to the block:%v, indexDummy:%v, coinMap:%v, error:%v", block, indexDummy, coinMap, err)
+		return err
 	}
 
-	return true
+	return nil
 }

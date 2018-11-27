@@ -1,7 +1,6 @@
 package service
 
 import (
-	"fmt"
 	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/logic/lblock"
 	"github.com/copernet/copernicus/logic/lchain"
@@ -29,35 +28,38 @@ func ProcessBlockHeader(headerList []*block.BlockHeader, lastIndex *blockindex.B
 	return nil
 }
 
-func ProcessBlock(b *block.Block) (bool, error) {
+func ProcessBlock(b *block.Block, forceProcessing bool) (bool, error) {
 	h := b.GetHash()
 	gChain := chain.GetInstance()
 	coinsTip := utxo.GetUtxoCacheInstance()
 	coinsTipHash, _ := coinsTip.GetBestBlock()
 
-	log.Trace("Begin processing block: %s, Global Chain height: %d, tipHash: %s, coinsTip hash: %s",
-		h, gChain.Height(), gChain.Tip().GetBlockHash(), coinsTipHash)
+	blockTime := time.Unix(int64(b.Header.Time), 0).Format("2006-01-02 03:04:05 PM")
+	log.Trace("Begin processing block: %s, Global Chain height: %d, tipHash: %s, coinsTip hash: %s, process block time is:%s",
+		h, gChain.Height(), gChain.Tip().GetBlockHash(), coinsTipHash, blockTime)
 
 	isNewBlock := false
 
-	err := ProcessNewBlock(b, true, &isNewBlock)
+	err := ProcessNewBlock(b, forceProcessing, &isNewBlock)
 
 	if err != nil {
 		log.Trace("processBlock failed ...")
 		return isNewBlock, err
 	}
 
-	coinsTipHash, _ = coinsTip.GetBestBlock()
-	log.Trace("After process block: %s, Global Chain height: %d, tipHash: %s, coinsTip hash: %s",
-		h, gChain.Height(), gChain.Tip().GetBlockHash(), coinsTipHash)
+	coinsTipHash, err = coinsTip.GetBestBlock()
+	if err != nil {
+		log.Error("get best block again error:%s", err.Error())
+		return false, err
+	}
 
-	fmt.Printf("Processed block: %s, Chain height: %d, tipHash: %s, coinsTip hash: %s currenttime:%v\n",
-		h, gChain.Height(), gChain.Tip().GetBlockHash(), coinsTipHash, time.Now())
+	log.Trace("After process block: %s, Global Chain height: %d, tipHash: %s, coinsTip hash: %s, process block time is:%s",
+		h, gChain.Height(), gChain.Tip().GetBlockHash(), coinsTipHash, blockTime)
 
 	return isNewBlock, err
 }
 
-func ProcessNewBlock(pblock *block.Block, fForceProcessing bool, fNewBlock *bool) error {
+func ProcessNewBlock(pblock *block.Block, forceProcessing bool, fNewBlock *bool) error {
 
 	if fNewBlock != nil {
 		*fNewBlock = false
@@ -72,7 +74,7 @@ func ProcessNewBlock(pblock *block.Block, fForceProcessing bool, fNewBlock *bool
 	persist.CsMain.Lock()
 	defer persist.CsMain.Unlock()
 
-	if _, _, err := lblock.AcceptBlock(pblock, fForceProcessing, nil, fNewBlock); err != nil {
+	if _, _, err := lblock.AcceptBlock(pblock, forceProcessing, nil, fNewBlock); err != nil {
 		h := pblock.GetHash()
 		log.Error(" AcceptBlock FAILED: %s err:%v", h.String(), err)
 		return err

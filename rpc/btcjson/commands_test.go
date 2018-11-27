@@ -4,7 +4,6 @@
 
 package btcjson
 
-/*
 import (
 	"bytes"
 	"encoding/json"
@@ -49,32 +48,32 @@ func TestChainSvrCmds(t *testing.T) {
 				txInputs := []TransactionInput{
 					{Txid: "123", Vout: 1},
 				}
-				amounts := map[string]float64{"456": .0123}
+				amounts := map[string]AmountType{"456": .0123}
 				return NewCreateRawTransactionCmd(txInputs, amounts, nil)
 			},
-			marshalled: `{"jsonrpc":"1.0","method":"createrawtransaction","params":[[{"txid":"123","vout":1}],{"456":0.0123}],"id":1}`,
+			marshalled: `{"jsonrpc":"1.0","method":"createrawtransaction","params":[[{"txid":"123","vout":1,"sequence":null}],{"456":0.0123}],"id":1}`,
 			unmarshalled: &CreateRawTransactionCmd{
 				Inputs:  []TransactionInput{{Txid: "123", Vout: 1}},
-				Amounts: map[string]float64{"456": .0123},
+				Outputs: map[string]AmountType{"456": .0123},
 			},
 		},
 		{
 			name: "createrawtransaction optional",
 			newCmd: func() (interface{}, error) {
-				return NewCmd("createrawtransaction", `[{"txid":"123","vout":1}]`,
+				return NewCmd("createrawtransaction", `[{"txid":"123","vout":1,"sequence":1}]`,
 					`{"456":0.0123}`, int64(12312333333))
 			},
 			staticCmd: func() interface{} {
 				txInputs := []TransactionInput{
-					{Txid: "123", Vout: 1},
+					{Txid: "123", Vout: 1, Sequence: Int64(1)},
 				}
-				amounts := map[string]float64{"456": .0123}
+				amounts := map[string]AmountType{"456": .0123}
 				return NewCreateRawTransactionCmd(txInputs, amounts, Int64(12312333333))
 			},
-			marshalled: `{"jsonrpc":"1.0","method":"createrawtransaction","params":[[{"txid":"123","vout":1}],{"456":0.0123},12312333333],"id":1}`,
+			marshalled: `{"jsonrpc":"1.0","method":"createrawtransaction","params":[[{"txid":"123","vout":1,"sequence":1}],{"456":0.0123},12312333333],"id":1}`,
 			unmarshalled: &CreateRawTransactionCmd{
-				Inputs:   []TransactionInput{{Txid: "123", Vout: 1}},
-				Amounts:  map[string]float64{"456": .0123},
+				Inputs:   []TransactionInput{{Txid: "123", Vout: 1, Sequence: Int64(1)}},
+				Outputs:  map[string]AmountType{"456": .0123},
 				LockTime: Int64(12312333333),
 			},
 		},
@@ -104,21 +103,21 @@ func TestChainSvrCmds(t *testing.T) {
 		{
 			name: "getaddednodeinfo",
 			newCmd: func() (interface{}, error) {
-				return NewCmd("getaddednodeinfo", true)
+				return NewCmd("getaddednodeinfo")
 			},
 			staticCmd: func() interface{} {
-				return NewGetAddedNodeInfoCmd(true, nil)
+				return NewGetAddedNodeInfoCmd(nil)
 			},
-			marshalled:   `{"jsonrpc":"1.0","method":"getaddednodeinfo","params":[true],"id":1}`,
+			marshalled:   `{"jsonrpc":"1.0","method":"getaddednodeinfo","params":[],"id":1}`,
 			unmarshalled: &GetAddedNodeInfoCmd{Node: nil},
 		},
 		{
 			name: "getaddednodeinfo optional",
 			newCmd: func() (interface{}, error) {
-				return NewCmd("getaddednodeinfo", true, "127.0.0.1")
+				return NewCmd("getaddednodeinfo", "127.0.0.1")
 			},
 			staticCmd: func() interface{} {
-				return NewGetAddedNodeInfoCmd(true, String("127.0.0.1"))
+				return NewGetAddedNodeInfoCmd(String("127.0.0.1"))
 			},
 			marshalled: `{"jsonrpc":"1.0","method":"getaddednodeinfo","params":["127.0.0.1"],"id":1}`,
 			unmarshalled: &GetAddedNodeInfoCmd{
@@ -232,92 +231,90 @@ func TestChainSvrCmds(t *testing.T) {
 				Verbose: Bool(true),
 			},
 		},
-		/*
-			{
-				name: "getblocktemplate",
-				newCmd: func() (interface{}, error) {
-					return NewCmd("getblocktemplate")
-				},
-				staticCmd: func() interface{} {
-					return NewGetBlockTemplateCmd(nil)
-				},
-				marshalled:   `{"jsonrpc":"1.0","method":"getblocktemplate","params":[],"id":1}`,
-				unmarshalled: &GetBlockTemplateCmd{Request: nil},
+		{
+			name: "getblocktemplate",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("getblocktemplate")
 			},
-			{
-				name: "getblocktemplate optional - template request",
-				newCmd: func() (interface{}, error) {
-					return NewCmd("getblocktemplate", `{"mode":"template","capabilities":["longpoll","coinbasetxn"]}`)
-				},
-				staticCmd: func() interface{} {
-					template := TemplateRequest{
-						Mode:         "template",
-						Capabilities: []string{"longpoll", "coinbasetxn"},
-					}
-					return NewGetBlockTemplateCmd(&template)
-				},
-				marshalled: `{"jsonrpc":"1.0","method":"getblocktemplate","params":[{"mode":"template","capabilities":["longpoll","coinbasetxn"]}],"id":1}`,
-				unmarshalled: &GetBlockTemplateCmd{
-					Request: &TemplateRequest{
-						Mode:         "template",
-						Capabilities: []string{"longpoll", "coinbasetxn"},
-					},
+			staticCmd: func() interface{} {
+				return NewGetBlockTemplateCmd(nil)
+			},
+			marshalled:   `{"jsonrpc":"1.0","method":"getblocktemplate","params":[],"id":1}`,
+			unmarshalled: &GetBlockTemplateCmd{Request: nil},
+		},
+		{
+			name: "getblocktemplate optional - template request",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("getblocktemplate", `{"mode":"template","capabilities":["longpoll","coinbasetxn"]}`)
+			},
+			staticCmd: func() interface{} {
+				template := TemplateRequest{
+					Mode:         "template",
+					Capabilities: []string{"longpoll", "coinbasetxn"},
+				}
+				return NewGetBlockTemplateCmd(&template)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"getblocktemplate","params":[{"mode":"template","capabilities":["longpoll","coinbasetxn"]}],"id":1}`,
+			unmarshalled: &GetBlockTemplateCmd{
+				Request: &TemplateRequest{
+					Mode:         "template",
+					Capabilities: []string{"longpoll", "coinbasetxn"},
 				},
 			},
-			{
-				name: "getblocktemplate optional - template request with tweaks",
-				newCmd: func() (interface{}, error) {
-					return NewCmd("getblocktemplate", `{"mode":"template","capabilities":["longpoll","coinbasetxn"],"sigoplimit":500,"sizelimit":100000000,"maxversion":2}`)
-				},
-				staticCmd: func() interface{} {
-					template := TemplateRequest{
-						Mode:         "template",
-						Capabilities: []string{"longpoll", "coinbasetxn"},
-						SigOpLimit:   500,
-						SizeLimit:    100000000,
-						MaxVersion:   2,
-					}
-					return NewGetBlockTemplateCmd(&template)
-				},
-				marshalled: `{"jsonrpc":"1.0","method":"getblocktemplate","params":[{"mode":"template","capabilities":["longpoll","coinbasetxn"],"sigoplimit":500,"sizelimit":100000000,"maxversion":2}],"id":1}`,
-				unmarshalled: &GetBlockTemplateCmd{
-					Request: &TemplateRequest{
-						Mode:         "template",
-						Capabilities: []string{"longpoll", "coinbasetxn"},
-						SigOpLimit:   int64(500),
-						SizeLimit:    int64(100000000),
-						MaxVersion:   2,
-					},
+		},
+		{
+			name: "getblocktemplate optional - template request with tweaks",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("getblocktemplate", `{"mode":"template","capabilities":["longpoll","coinbasetxn"],"sigoplimit":500,"sizelimit":100000000,"maxversion":2}`)
+			},
+			staticCmd: func() interface{} {
+				template := TemplateRequest{
+					Mode:         "template",
+					Capabilities: []string{"longpoll", "coinbasetxn"},
+					SigOpLimit:   500,
+					SizeLimit:    100000000,
+					MaxVersion:   2,
+				}
+				return NewGetBlockTemplateCmd(&template)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"getblocktemplate","params":[{"mode":"template","capabilities":["longpoll","coinbasetxn"],"sigoplimit":500,"sizelimit":100000000,"maxversion":2}],"id":1}`,
+			unmarshalled: &GetBlockTemplateCmd{
+				Request: &TemplateRequest{
+					Mode:         "template",
+					Capabilities: []string{"longpoll", "coinbasetxn"},
+					SigOpLimit:   int64(500),
+					SizeLimit:    int64(100000000),
+					MaxVersion:   2,
 				},
 			},
-			{
-				name: "getblocktemplate optional - template request with tweaks 2",
-				newCmd: func() (interface{}, error) {
-					return NewCmd("getblocktemplate", `{"mode":"template","capabilities":["longpoll","coinbasetxn"],"sigoplimit":true,"sizelimit":100000000,"maxversion":2}`)
-				},
-				staticCmd: func() interface{} {
-					template := TemplateRequest{
-						Mode:         "template",
-						Capabilities: []string{"longpoll", "coinbasetxn"},
-						SigOpLimit:   true,
-						SizeLimit:    100000000,
-						MaxVersion:   2,
-					}
-					return NewGetBlockTemplateCmd(&template)
-				},
-				marshalled: `{"jsonrpc":"1.0","method":"getblocktemplate","params":[{"mode":"template","capabilities":["longpoll","coinbasetxn"],"sigoplimit":true,"sizelimit":100000000,"maxversion":2}],"id":1}`,
-				unmarshalled: &GetBlockTemplateCmd{
-					Request: &TemplateRequest{
-						Mode:         "template",
-						Capabilities: []string{"longpoll", "coinbasetxn"},
-						SigOpLimit:   true,
-						SizeLimit:    int64(100000000),
-						MaxVersion:   2,
-					},
+		},
+		{
+			name: "getblocktemplate optional - template request with tweaks 2",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("getblocktemplate", `{"mode":"template","capabilities":["longpoll","coinbasetxn"],"sigoplimit":true,"sizelimit":100000000,"maxversion":2}`)
+			},
+			staticCmd: func() interface{} {
+				template := TemplateRequest{
+					Mode:         "template",
+					Capabilities: []string{"longpoll", "coinbasetxn"},
+					SigOpLimit:   true,
+					SizeLimit:    100000000,
+					MaxVersion:   2,
+				}
+				return NewGetBlockTemplateCmd(&template)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"getblocktemplate","params":[{"mode":"template","capabilities":["longpoll","coinbasetxn"],"sigoplimit":true,"sizelimit":100000000,"maxversion":2}],"id":1}`,
+			unmarshalled: &GetBlockTemplateCmd{
+				Request: &TemplateRequest{
+					Mode:         "template",
+					Capabilities: []string{"longpoll", "coinbasetxn"},
+					SigOpLimit:   true,
+					SizeLimit:    int64(100000000),
+					MaxVersion:   2,
 				},
 			},
-*/
-/*
+		},
+
 		{
 			name: "getchaintips",
 			newCmd: func() (interface{}, error) {
@@ -451,7 +448,7 @@ func TestChainSvrCmds(t *testing.T) {
 			},
 			marshalled: `{"jsonrpc":"1.0","method":"getnetworkhashps","params":[],"id":1}`,
 			unmarshalled: &GetNetworkHashPSCmd{
-				Blocks: Int(120),
+				Blocks: Int32(120),
 				Height: Int32(-1),
 			},
 		},
@@ -461,11 +458,11 @@ func TestChainSvrCmds(t *testing.T) {
 				return NewCmd("getnetworkhashps", 200)
 			},
 			staticCmd: func() interface{} {
-				return NewGetNetworkHashPSCmd(Int(200), nil)
+				return NewGetNetworkHashPSCmd(Int32(200), nil)
 			},
 			marshalled: `{"jsonrpc":"1.0","method":"getnetworkhashps","params":[200],"id":1}`,
 			unmarshalled: &GetNetworkHashPSCmd{
-				Blocks: Int(200),
+				Blocks: Int32(200),
 				Height: Int32(-1),
 			},
 		},
@@ -475,11 +472,11 @@ func TestChainSvrCmds(t *testing.T) {
 				return NewCmd("getnetworkhashps", 200, 123)
 			},
 			staticCmd: func() interface{} {
-				return NewGetNetworkHashPSCmd(Int(200), Int32(123))
+				return NewGetNetworkHashPSCmd(Int32(200), Int32(123))
 			},
 			marshalled: `{"jsonrpc":"1.0","method":"getnetworkhashps","params":[200,123],"id":1}`,
 			unmarshalled: &GetNetworkHashPSCmd{
-				Blocks: Int(200),
+				Blocks: Int32(200),
 				Height: Int32(123),
 			},
 		},
@@ -531,21 +528,21 @@ func TestChainSvrCmds(t *testing.T) {
 			marshalled: `{"jsonrpc":"1.0","method":"getrawtransaction","params":["123"],"id":1}`,
 			unmarshalled: &GetRawTransactionCmd{
 				Txid:    "123",
-				Verbose: Int(0),
+				Verbose: Bool(false),
 			},
 		},
 		{
 			name: "getrawtransaction optional",
 			newCmd: func() (interface{}, error) {
-				return NewCmd("getrawtransaction", "123", 1)
+				return NewCmd("getrawtransaction", "123", true)
 			},
 			staticCmd: func() interface{} {
-				return NewGetRawTransactionCmd("123", Int(1))
+				return NewGetRawTransactionCmd("123", Bool(true))
 			},
-			marshalled: `{"jsonrpc":"1.0","method":"getrawtransaction","params":["123",1],"id":1}`,
+			marshalled: `{"jsonrpc":"1.0","method":"getrawtransaction","params":["123",true],"id":1}`,
 			unmarshalled: &GetRawTransactionCmd{
 				Txid:    "123",
-				Verbose: Int(1),
+				Verbose: Bool(true),
 			},
 		},
 		{
@@ -888,34 +885,36 @@ func TestChainSvrCmds(t *testing.T) {
 				AllowHighFees: Bool(false),
 			},
 		},
-		{
-			name: "setgenerate",
-			newCmd: func() (interface{}, error) {
-				return NewCmd("setgenerate", true)
+		/*
+			{
+				name: "setgenerate",
+				newCmd: func() (interface{}, error) {
+					return NewCmd("setgenerate", true)
+				},
+				staticCmd: func() interface{} {
+					return NewSetGenerateCmd(true, nil)
+				},
+				marshalled: `{"jsonrpc":"1.0","method":"setgenerate","params":[true],"id":1}`,
+				unmarshalled: &SetGenerateCmd{
+					Generate:     true,
+					GenProcLimit: Int(-1),
+				},
 			},
-			staticCmd: func() interface{} {
-				return NewSetGenerateCmd(true, nil)
+			{
+				name: "setgenerate optional",
+				newCmd: func() (interface{}, error) {
+					return NewCmd("setgenerate", true, 6)
+				},
+				staticCmd: func() interface{} {
+					return NewSetGenerateCmd(true, Int(6))
+				},
+				marshalled: `{"jsonrpc":"1.0","method":"setgenerate","params":[true,6],"id":1}`,
+				unmarshalled: &SetGenerateCmd{
+					Generate:     true,
+					GenProcLimit: Int(6),
+				},
 			},
-			marshalled: `{"jsonrpc":"1.0","method":"setgenerate","params":[true],"id":1}`,
-			unmarshalled: &SetGenerateCmd{
-				Generate:     true,
-				GenProcLimit: Int(-1),
-			},
-		},
-		{
-			name: "setgenerate optional",
-			newCmd: func() (interface{}, error) {
-				return NewCmd("setgenerate", true, 6)
-			},
-			staticCmd: func() interface{} {
-				return NewSetGenerateCmd(true, Int(6))
-			},
-			marshalled: `{"jsonrpc":"1.0","method":"setgenerate","params":[true,6],"id":1}`,
-			unmarshalled: &SetGenerateCmd{
-				Generate:     true,
-				GenProcLimit: Int(6),
-			},
-		},
+		*/
 		{
 			name: "stop",
 			newCmd: func() (interface{}, error) {
@@ -1054,6 +1053,435 @@ func TestChainSvrCmds(t *testing.T) {
 				Proof: "test",
 			},
 		},
+		{
+			name: "waitforblockheight",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("waitforblockheight", 123)
+			},
+			staticCmd: func() interface{} {
+				return NewWaitForBlockHeightCmd(123, nil)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"waitforblockheight","params":[123],"id":1}`,
+			unmarshalled: &WaitForBlockHeightCmd{
+				Height:  123,
+				Timeout: Int(0),
+			},
+		},
+		{
+			name: "waitforblockheight optional",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("waitforblockheight", 123, 1)
+			},
+			staticCmd: func() interface{} {
+				return NewWaitForBlockHeightCmd(123, Int(1))
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"waitforblockheight","params":[123,1],"id":1}`,
+			unmarshalled: &WaitForBlockHeightCmd{
+				Height:  123,
+				Timeout: Int(1),
+			},
+		},
+		{
+			name: "pruneblockchain",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("pruneblockchain", 123)
+			},
+			staticCmd: func() interface{} {
+				return NewPruneBlockChainCmd(123)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"pruneblockchain","params":[123],"id":1}`,
+			unmarshalled: &PruneBlockChainCmd{
+				Height: 123,
+			},
+		},
+		{
+			name: "echo",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("echo")
+			},
+			staticCmd: func() interface{} {
+				return NewEchoCmd()
+			},
+			marshalled:   `{"jsonrpc":"1.0","method":"echo","params":[],"id":1}`,
+			unmarshalled: &EchoCmd{},
+		},
+		{
+			name: "getchaintxstats",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("getchaintxstats")
+			},
+			staticCmd: func() interface{} {
+				return NewGetChainTxStatsCmd(nil, nil)
+			},
+			marshalled:   `{"jsonrpc":"1.0","method":"getchaintxstats","params":[],"id":1}`,
+			unmarshalled: &GetChainTxStatsCmd{},
+		},
+		{
+			name: "getchaintxstats optional",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("getchaintxstats", 123, "test")
+			},
+			staticCmd: func() interface{} {
+				return NewGetChainTxStatsCmd(Int32(123), String("test"))
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"getchaintxstats","params":[123,"test"],"id":1}`,
+			unmarshalled: &GetChainTxStatsCmd{
+				Blocks:    Int32(123),
+				BlockHash: String("test"),
+			},
+		},
+		{
+			name: "version",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("version")
+			},
+			staticCmd: func() interface{} {
+				return NewVersionCmd()
+			},
+			marshalled:   `{"jsonrpc":"1.0","method":"version","params":[],"id":1}`,
+			unmarshalled: &VersionCmd{},
+		},
+		{
+			name: "signmessagewithprivkey",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("signmessagewithprivkey", "test", "abc")
+			},
+			staticCmd: func() interface{} {
+				return NewSignMessageWithPrivkeyCmd("test", "abc")
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"signmessagewithprivkey","params":["test","abc"],"id":1}`,
+			unmarshalled: &SignMessageWithPrivkeyCmd{
+				Privkey: "test",
+				Message: "abc",
+			},
+		},
+		{
+			name: "generate",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("generate", 123)
+			},
+			staticCmd: func() interface{} {
+				return NewGenerateCmd(123, nil)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"generate","params":[123],"id":1}`,
+			unmarshalled: &GenerateCmd{
+				NumBlocks: 123,
+				MaxTries:  Uint64(1000000),
+			},
+		},
+		{
+			name: "generate optional",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("generate", 123, 666)
+			},
+			staticCmd: func() interface{} {
+				return NewGenerateCmd(123, Uint64(666))
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"generate","params":[123,666],"id":1}`,
+			unmarshalled: &GenerateCmd{
+				NumBlocks: 123,
+				MaxTries:  Uint64(666),
+			},
+		},
+		{
+			name: "generatetoaddress",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("generatetoaddress", 123, "test")
+			},
+			staticCmd: func() interface{} {
+				return NewGenerateToAddressCmd(123, "test", nil)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"generatetoaddress","params":[123,"test"],"id":1}`,
+			unmarshalled: &GenerateToAddressCmd{
+				NumBlocks: 123,
+				Address:   "test",
+				MaxTries:  Uint64(1000000),
+			},
+		},
+		{
+			name: "generatetoaddress optional",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("generatetoaddress", 123, "test", 666)
+			},
+			staticCmd: func() interface{} {
+				return NewGenerateToAddressCmd(123, "test", Uint64(666))
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"generatetoaddress","params":[123,"test",666],"id":1}`,
+			unmarshalled: &GenerateToAddressCmd{
+				NumBlocks: 123,
+				Address:   "test",
+				MaxTries:  Uint64(666),
+			},
+		},
+		{
+			name: "estimatefee",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("estimatefee", 123)
+			},
+			staticCmd: func() interface{} {
+				return NewEstimateFeeCmd(123)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"estimatefee","params":[123],"id":1}`,
+			unmarshalled: &EstimateFeeCmd{
+				NumBlocks: 123,
+			},
+		},
+		{
+			name: "getbestblock",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("getbestblock")
+			},
+			staticCmd: func() interface{} {
+				return NewGetBestBlockCmd()
+			},
+			marshalled:   `{"jsonrpc":"1.0","method":"getbestblock","params":[],"id":1}`,
+			unmarshalled: &GetBestBlockCmd{},
+		},
+		{
+			name: "getheaders",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("getheaders", []string{"test"}, "abc")
+			},
+			staticCmd: func() interface{} {
+				return NewGetHeadersCmd([]string{"test"}, "abc")
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"getheaders","params":[["test"],"abc"],"id":1}`,
+			unmarshalled: &GetHeadersCmd{
+				BlockLocators: []string{"test"},
+				HashStop:      "abc",
+			},
+		},
+		{
+			name: "getcurrentnet",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("getcurrentnet")
+			},
+			staticCmd: func() interface{} {
+				return NewGetCurrentNetCmd()
+			},
+			marshalled:   `{"jsonrpc":"1.0","method":"getcurrentnet","params":[],"id":1}`,
+			unmarshalled: &GetCurrentNetCmd{},
+		},
+		{
+			name: "node",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("node", "test", "abc")
+			},
+			staticCmd: func() interface{} {
+				return NewNodeCmd("test", "abc", nil)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"node","params":["test","abc"],"id":1}`,
+			unmarshalled: &NodeCmd{
+				SubCmd: "test",
+				Target: "abc",
+			},
+		},
+		{
+			name: "node optional",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("node", "test", "abc", "xyz")
+			},
+			staticCmd: func() interface{} {
+				return NewNodeCmd("test", "abc", String("xyz"))
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"node","params":["test","abc","xyz"],"id":1}`,
+			unmarshalled: &NodeCmd{
+				SubCmd:        "test",
+				Target:        "abc",
+				ConnectSubCmd: String("xyz"),
+			},
+		},
+		{
+			name: "getnewaddress",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("getnewaddress")
+			},
+			staticCmd: func() interface{} {
+				return NewGetNewAddressCmd(nil)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"getnewaddress","params":[],"id":1}`,
+			unmarshalled: &GetNewAddressCmd{
+				Account: String(""),
+			},
+		},
+		{
+			name: "getnewaddress optional",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("getnewaddress", "abc")
+			},
+			staticCmd: func() interface{} {
+				return NewGetNewAddressCmd(String("abc"))
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"getnewaddress","params":["abc"],"id":1}`,
+			unmarshalled: &GetNewAddressCmd{
+				Account: String("abc"),
+			},
+		},
+		{
+			name: "listunspent",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("listunspent")
+			},
+			staticCmd: func() interface{} {
+				return NewListUnspentCmd(nil, nil, nil, nil)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"listunspent","params":[],"id":1}`,
+			unmarshalled: &ListUnspentCmd{
+				MinConf:       Int32(1),
+				MaxConf:       Int32(9999999),
+				IncludeUnsafe: Bool(true),
+			},
+		},
+		{
+			name: "listunspent optional",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("listunspent", 3, 100, []string{"abc", "xyz"}, false)
+			},
+			staticCmd: func() interface{} {
+				return NewListUnspentCmd(Int32(3), Int32(100), &[]string{"abc", "xyz"}, Bool(false))
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"listunspent","params":[3,100,["abc","xyz"],false],"id":1}`,
+			unmarshalled: &ListUnspentCmd{
+				MinConf:       Int32(3),
+				MaxConf:       Int32(100),
+				Addresses:     &[]string{"abc", "xyz"},
+				IncludeUnsafe: Bool(false),
+			},
+		},
+		{
+			name: "settxfee",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("settxfee", 0.01)
+			},
+			staticCmd: func() interface{} {
+				return NewSetTxFeeCmd(0.01)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"settxfee","params":[0.01],"id":1}`,
+			unmarshalled: &SetTxFeeCmd{
+				Amount: 0.01,
+			},
+		},
+		{
+			name: "sendtoaddress",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("sendtoaddress", "abc", "0.01")
+			},
+			staticCmd: func() interface{} {
+				return NewSendToAddressCmd("abc", "0.01", nil, nil, nil)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"sendtoaddress","params":["abc","0.01"],"id":1}`,
+			unmarshalled: &SendToAddressCmd{
+				Address:               "abc",
+				Amount:                "0.01",
+				SubtractFeeFromAmount: Bool(false),
+			},
+		},
+		{
+			name: "sendtoaddress optional",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("sendtoaddress", "abc", 0.01, "test", "xyz", true)
+			},
+			staticCmd: func() interface{} {
+				return NewSendToAddressCmd("abc", 0.01, String("test"), String("xyz"), Bool(true))
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"sendtoaddress","params":["abc",0.01,"test","xyz",true],"id":1}`,
+			unmarshalled: &SendToAddressCmd{
+				Address:               "abc",
+				Amount:                0.01,
+				Comment:               String("test"),
+				CommentTo:             String("xyz"),
+				SubtractFeeFromAmount: Bool(true),
+			},
+		},
+		{
+			name: "getbalance",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("getbalance")
+			},
+			staticCmd: func() interface{} {
+				return NewGetBalanceCmd(nil, nil)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"getbalance","params":[],"id":1}`,
+			unmarshalled: &GetBalanceCmd{
+				MinConf: Int(1),
+			},
+		},
+		{
+			name: "getbalance optional",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("getbalance", "abc", 123)
+			},
+			staticCmd: func() interface{} {
+				return NewGetBalanceCmd(String("abc"), Int(123))
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"getbalance","params":["abc",123],"id":1}`,
+			unmarshalled: &GetBalanceCmd{
+				Account: String("abc"),
+				MinConf: Int(123),
+			},
+		},
+		{
+			name: "gettransaction",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("gettransaction", "abc")
+			},
+			staticCmd: func() interface{} {
+				return NewGetTransactionCmd("abc", nil)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"gettransaction","params":["abc"],"id":1}`,
+			unmarshalled: &GetTransactionCmd{
+				Txid:             "abc",
+				IncludeWatchOnly: Bool(false),
+			},
+		},
+		{
+			name: "gettransaction optional",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("gettransaction", "abc", true)
+			},
+			staticCmd: func() interface{} {
+				return NewGetTransactionCmd("abc", Bool(true))
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"gettransaction","params":["abc",true],"id":1}`,
+			unmarshalled: &GetTransactionCmd{
+				Txid:             "abc",
+				IncludeWatchOnly: Bool(true),
+			},
+		},
+		{
+			name: "sendmany",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("sendmany", "abc", `{"456":0.0123}`)
+			},
+			staticCmd: func() interface{} {
+				amounts := map[string]AmountType{"456": .0123}
+				return NewSendManyCmd("abc", amounts, nil, nil, nil)
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"sendmany","params":["abc",{"456":0.0123}],"id":1}`,
+			unmarshalled: &SendManyCmd{
+				FromAccount: "abc",
+				Amounts:     map[string]AmountType{"456": .0123},
+				MinConf:     Int32(1),
+			},
+		},
+		{
+			name: "sendmany optional",
+			newCmd: func() (interface{}, error) {
+				return NewCmd("sendmany", "abc", `{"456":0.0123}`, 8, "xyz", []string{"test"})
+			},
+			staticCmd: func() interface{} {
+				amounts := map[string]AmountType{"456": .0123}
+				return NewSendManyCmd("abc", amounts, Int32(8), String("xyz"), &[]string{"test"})
+			},
+			marshalled: `{"jsonrpc":"1.0","method":"sendmany","params":["abc",{"456":0.0123},8,"xyz",["test"]],"id":1}`,
+			unmarshalled: &SendManyCmd{
+				FromAccount:     "abc",
+				Amounts:         map[string]AmountType{"456": .0123},
+				MinConf:         Int32(8),
+				Comment:         String("xyz"),
+				SubTractFeeFrom: &[]string{"test"},
+			},
+		},
 	}
 
 	t.Logf("Running %d tests", len(tests))
@@ -1175,4 +1603,3 @@ func TestChainSvrCmdErrors(t *testing.T) {
 		}
 	}
 }
-*/

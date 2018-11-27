@@ -9,6 +9,7 @@ import (
 	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/model/outpoint"
 	"github.com/copernet/copernicus/util"
+	"runtime"
 )
 
 type CoinsMap struct {
@@ -17,6 +18,14 @@ type CoinsMap struct {
 
 func (cm *CoinsMap) GetMap() map[outpoint.OutPoint]*Coin {
 	return cm.cacheCoins
+}
+
+func (cm *CoinsMap) DeepCopy() *CoinsMap {
+	newcm := NewEmptyCoinsMap()
+	for op, coin := range cm.GetMap() {
+		newcm.AddCoin(&op, coin, false)
+	}
+	return newcm
 }
 
 func NewEmptyCoinsMap() *CoinsMap {
@@ -75,6 +84,8 @@ func (cm *CoinsMap) Flush(hashBlock util.Hash) bool {
 }
 
 func (cm *CoinsMap) AddCoin(point *outpoint.OutPoint, coin *Coin, possibleOverwrite bool) {
+	coin = coin.DeepCopy()
+
 	if coin.IsSpent() {
 		panic("add a spent coin")
 	}
@@ -91,7 +102,6 @@ func (cm *CoinsMap) AddCoin(point *outpoint.OutPoint, coin *Coin, possibleOverwr
 	//}
 
 	coin.dirty = false
-	coin.fresh = true
 	cm.cacheCoins[*point] = coin
 
 }
@@ -128,7 +138,8 @@ func (cm *CoinsMap) FetchCoin(out *outpoint.OutPoint) *Coin {
 	}
 	coin = GetUtxoCacheInstance().GetCoin(out)
 	if coin == nil {
-		log.Error("not found coin by outpoint(%v)", out)
+		_, file, line, _ := runtime.Caller(1)
+		log.Warn("not found coin by outpoint(%v) invoked by %s:%d", out, file, line)
 		return nil
 	}
 	newCoin := coin.DeepCopy()

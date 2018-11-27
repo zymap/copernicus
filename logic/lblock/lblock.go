@@ -2,7 +2,7 @@ package lblock
 
 import (
 	"errors"
-
+	"github.com/copernet/copernicus/conf"
 	"github.com/copernet/copernicus/errcode"
 	"github.com/copernet/copernicus/log"
 	"github.com/copernet/copernicus/logic/lblockindex"
@@ -13,12 +13,11 @@ import (
 	"github.com/copernet/copernicus/model/blockindex"
 	"github.com/copernet/copernicus/model/chain"
 	"github.com/copernet/copernicus/model/consensus"
+	"github.com/copernet/copernicus/model/pow"
 	"github.com/copernet/copernicus/model/tx"
-	"github.com/copernet/copernicus/model/versionbits"
 	"github.com/copernet/copernicus/persist"
 	"github.com/copernet/copernicus/persist/disk"
 	"github.com/copernet/copernicus/util"
-	"github.com/copernet/copernicus/util/amount"
 )
 
 func GetBlockByIndex(bi *blockindex.BlockIndex, param *model.BitcoinParams) (blk *block.Block, err error) {
@@ -57,26 +56,6 @@ func WriteBlockToDisk(bi *blockindex.BlockIndex, bl *block.Block, inDbp *block.D
 	return pos, nil
 }
 
-func getLockTime(block *block.Block, indexPrev *blockindex.BlockIndex) int64 {
-	params := chain.GetInstance().GetParams()
-	lockTimeFlags := 0
-	if versionbits.VersionBitsState(indexPrev, params, consensus.DeploymentCSV, versionbits.VBCache) == versionbits.ThresholdActive {
-		lockTimeFlags |= consensus.LocktimeMedianTimePast
-	}
-
-	var medianTimePast int64
-	if indexPrev != nil {
-		medianTimePast = indexPrev.GetMedianTimePast()
-	}
-
-	lockTimeCutoff := int64(block.Header.Time)
-	if lockTimeFlags&consensus.LocktimeMedianTimePast != 0 {
-		lockTimeCutoff = medianTimePast
-	}
-
-	return lockTimeCutoff
-}
-
 func CheckBlock(pblock *block.Block, checkHeader, checkMerlke bool) error {
 	// These are checks that are independent of context.
 	if pblock.Checked {
@@ -97,7 +76,7 @@ func CheckBlock(pblock *block.Block, checkHeader, checkMerlke bool) error {
 		hashMerkleRoot2 := lmerkleroot.BlockMerkleRoot(pblock.Txs, &mutated)
 		if !bh.MerkleRoot.IsEqual(&hashMerkleRoot2) {
 			log.Debug("ErrorBadTxMrklRoot")
-			return errcode.New(errcode.ErrorBadTxnMrklRoot)
+			return errcode.NewError(errcode.RejectInvalid, "bad-txnmrklroot")
 		}
 	}
 
@@ -106,28 +85,38 @@ func CheckBlock(pblock *block.Block, checkHeader, checkMerlke bool) error {
 	// root of a lblock, while still invalidating it.
 	if mutated {
 		log.Debug("ErrorbadTxnsDuplicate")
-		return errcode.New(errcode.ErrorbadTxnsDuplicate)
+		return errcode.NewError(errcode.RejectInvalid, "bad-txns-duplicate")
+	}
+
+	// First transaction must be coinbase
+	if len(pblock.Txs) == 0 {
+		return errcode.NewError(errcode.RejectInvalid, "bad-cb-missing")
 	}
 
 	// size limits
-	nMaxBlockSize := consensus.DefaultMaxBlockSize
+	nMaxBlockSize := conf.Cfg.Excessiveblocksize
 	// Bail early if there is no way this lblock is of reasonable size.
 	minTransactionSize := tx.NewEmptyTx().EncodeSize()
-	if len(pblock.Txs)*int(minTransactionSize) > nMaxBlockSize {
+	if uint64(len(pblock.Txs)*int(minTransactionSize)) > nMaxBlockSize {
 		log.Debug("ErrorBadBlkLength")
-		return errcode.New(errcode.ErrorBadBlkLength)
-	}
-	currentBlockSize := pblock.EncodeSize()
-	if currentBlockSize > nMaxBlockSize {
-		log.Debug("ErrorBadBlkTxSize")
-		return errcode.New(errcode.ErrorBadBlkTxSize)
+		return errcode.NewError(errcode.RejectInvalid, "bad-blk-length")
 	}
 
-	nMaxBlockSigOps := consensus.GetMaxBlockSigOpsCount(uint64(currentBlockSize))
+	currentBlockSize := pblock.EncodeSize()
+	if uint64(currentBlockSize) > nMaxBlockSize {
+		log.Debug("ErrorBadBlkTxSize")
+		return errcode.NewError(errcode.RejectInvalid, "bad-blk-length")
+	}
+
+	nMaxBlockSigOps, errSig := consensus.GetMaxBlockSigOpsCount(uint64(currentBlockSize))
+	if errSig != nil {
+		return errSig
+	}
+
 	err := ltx.CheckBlockTransactions(pblock.Txs, nMaxBlockSigOps)
 	if err != nil {
 		log.Debug("ErrorBadBlkTx: %v", err)
-		return errcode.New(errcode.ErrorBadBlkTx)
+		return err
 	}
 	pblock.Checked = true
 
@@ -135,26 +124,31 @@ func CheckBlock(pblock *block.Block, checkHeader, checkMerlke bool) error {
 }
 
 func ContextualCheckBlock(b *block.Block, indexPrev *blockindex.BlockIndex) error {
-
-	bMonolithEnable := false
-	if indexPrev != nil && model.IsMonolithEnabled(indexPrev.GetMedianTimePast()) {
-		bMonolithEnable = true
-	}
-	if !bMonolithEnable {
-		if b.EncodeSize() > 8*consensus.OneMegaByte {
-			return errcode.New(errcode.ErrorBlockSize)
-		}
-	}
 	var height int32
 	if indexPrev != nil {
 		height = indexPrev.Height + 1
 	}
 
-	lockTimeCutoff := getLockTime(b, indexPrev)
+	// Start enforcing BIP113 (Median Time Past).
+	lockTimeFlags := 0
+	if height >= chain.GetInstance().GetParams().CSVHeight {
+		lockTimeFlags |= consensus.LocktimeMedianTimePast
+	}
+
+	var mediaTimePast int64
+	if indexPrev != nil {
+		mediaTimePast = indexPrev.GetMedianTimePast()
+	}
+
+	lockTimeCutoff := int64(b.Header.Time)
+	if lockTimeFlags&consensus.LocktimeMedianTimePast != 0 {
+		lockTimeCutoff = mediaTimePast
+	}
 
 	// Check that all transactions are finalized
 	// Enforce rule that the coinBase starts with serialized lblock height
-	err := ltx.ContextureCheckBlockTransactions(b.Txs, height, lockTimeCutoff)
+	err := ltx.ContextureCheckBlockTransactions(b.Txs, height, lockTimeCutoff,
+		mediaTimePast)
 	return err
 }
 
@@ -176,10 +170,18 @@ func ReceivedBlockTransactions(pblock *block.Block,
 	gChain := chain.GetInstance()
 	if pindexNew.IsGenesis(gChain.GetParams()) || gChain.ParentInBranch(pindexNew) {
 		// If indexNew is the genesis lblock or all parents are in branch
-		gChain.AddToBranch(pindexNew)
+		err := gChain.AddToBranch(pindexNew)
+		if err != nil {
+			log.Error("add block index to branch error:%d", err)
+			return
+		}
 	} else {
 		if pindexNew.Prev.IsValid(blockindex.BlockValidTree) {
-			gChain.AddToOrphan(pindexNew)
+			err := gChain.AddToOrphan(pindexNew)
+			if err != nil {
+				log.Error("add block index to orphan error:%d", err)
+				return
+			}
 		}
 	}
 }
@@ -188,19 +190,6 @@ func ReceivedBlockTransactions(pblock *block.Block,
 func GetBlockScriptFlags(pindex *blockindex.BlockIndex) uint32 {
 	gChain := chain.GetInstance()
 	return gChain.GetBlockScriptFlags(pindex)
-}
-
-func GetBlockSubsidy(height int32, params *model.BitcoinParams) amount.Amount {
-	halvings := height / params.SubsidyReductionInterval
-	// Force lblock reward to zero when right shift is undefined.
-	if halvings >= 64 {
-		return 0
-	}
-
-	nSubsidy := amount.Amount(50 * util.COIN)
-	// Subsidy is cut in half every 210,000 blocks which will occur
-	// approximately every 4 years.
-	return amount.Amount(uint(nSubsidy) >> uint(halvings))
 }
 
 // AcceptBlock Store a block on disk.
@@ -224,24 +213,26 @@ func AcceptBlock(pblock *block.Block, fRequested bool, inDbp *block.DiskBlockPos
 	gChain := chain.GetInstance()
 	if !fRequested {
 		tip := gChain.Tip()
-		fHasMoreWork := false
-		if tip == nil {
-			fHasMoreWork = true
-		} else {
-			tipWork := tip.ChainWork
-			if bIndex.ChainWork.Cmp(&tipWork) == 1 {
-				fHasMoreWork = true
-			}
-		}
-		if !fHasMoreWork {
+
+		hasMoreWork := tip == nil || bIndex.ChainWork.Cmp(&tip.ChainWork) == 1
+		if !hasMoreWork {
 			log.Debug("AcceptBlockHeader err:%d", 3008)
 			err = errcode.ProjectError{Code: 3008}
 			return
 		}
+
 		fTooFarAhead := bIndex.Height > gChain.Height()+block.MinBlocksToKeep
 		if fTooFarAhead {
 			log.Debug("AcceptBlockHeader err:%d", 3007)
 			err = errcode.ProjectError{Code: 3007}
+			return
+		}
+
+		// Protect against DoS attacks from low-work chains.  If our tip is behind,
+		// a peer could try to send us low-work blocks on a fake chain that we would never
+		// request; don't process these.
+		mcw := pow.HashToBig(&model.ActiveNetParams.MinimumChainWork)
+		if bIndex.ChainWork.Cmp(mcw) == -1 {
 			return
 		}
 	}
@@ -259,13 +250,12 @@ func AcceptBlock(pblock *block.Block, fRequested bool, inDbp *block.DiskBlockPos
 		return
 	}
 
-	// TODO: relay this lblock
-
 	// inDbp is nil indicate that this block haven't been write to disk
 	// when reindex, inDbp is not nil, and outDbp will be same as inDbp, and block will not be write to disk
 	outDbp, err = WriteBlockToDisk(bIndex, pblock, inDbp)
 	if err != nil {
-		panic("AcceptBlockHeader WriteBlockTo Disk err")
+		log.Error("AcceptBlockHeader WriteBlockTo Disk err" + err.Error())
+		return
 	}
 
 	ReceivedBlockTransactions(pblock, bIndex, outDbp)
@@ -300,13 +290,13 @@ func AcceptBlockHeader(bh *block.BlockHeader) (*blockindex.BlockIndex, error) {
 			log.Debug("AcceptBlockHeader Invalid Pre index")
 			return nil, errcode.ProjectError{Code: 3100}
 		}
-		if !lblockindex.CheckIndexAgainstCheckpoint(bIndex.Prev) {
+		if err := lblockindex.CheckIndexAgainstCheckpoint(bIndex.Prev); err != nil {
 			log.Debug("AcceptBlockHeader err:%d", 3100)
 			return nil, errcode.ProjectError{Code: 3100}
 		}
-		if !ContextualCheckBlockHeader(bh, bIndex.Prev, util.GetAdjustedTime()) {
+		if err = ContextualCheckBlockHeader(bh, bIndex.Prev, util.GetAdjustedTime()); err != nil {
 			log.Debug("AcceptBlockHeader err:%d", 3101)
-			return nil, errcode.ProjectError{Code: 3101}
+			return nil, err
 		}
 	}
 

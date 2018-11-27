@@ -1,64 +1,17 @@
+sudo: required
+
 language: go
-addons:
-  apt:
-    sources:
-      - ubuntu-toolchain-r-test
-      - sourceline: 'ppa:masterminds/glide'
-    packages:
-      - g++-6
-      - gcc-6
-      - libsnappy-dev
-      - zlib1g-dev
-      - libbz2-dev
-      - glide
-go:
-  - 1.10.x
 
-cache:
-  ccache: true
-  apt: true
-  directories:
-    - ${TRAVIS_BUILD_DIR}/vendor
-    - $HOME/.glide
-    - _venv
-    - $GOPATH/src
-    - $GOPATH/pkg
-    - depends/built
-    - depends/sdk-sources
-    - .autoconf
-
-before_cache:
-  - $HOME/gopath/bin/goveralls -coverprofile=coverage.out -service=travis-ci -repotoken $COVERALLS_TOKEN
-  - find $HOME/.glide/cache -name ORIG_HEAD -exec rm {} \;
-  - rm -rf $GOPATH/src/github.com/copernet/copernicus/*
-  - rm -rf $GOPATH/pkg/**/github.com/copernet/copernicus
+services:
+  - docker
 
 before_install:
-  - export GOROOT=$(go env GOROOT)
-  - export CXX="g++-6" CC="gcc-6"
-  - export PATH=$PATH:$HOME/gopath/bin
-
-
-install:
-
-  - git clone https://github.com/copernet/secp256k1.git /tmp/secp256k1
-  - pushd /tmp/secp256k1
-  - ./autogen.sh
-  - ./configure --enable-experimental --enable-module-ecdh --enable-module-recovery
-  - make -j16
-  - sudo make install
-  - cd -
-
-  - glide install
-
-  - go get  github.com/alecthomas/gometalinter
-  - gometalinter --install
-  - go get golang.org/x/tools/cmd/cover
-  - go get github.com/mattn/goveralls
-
+  - docker build -t copernet/copernicus .
+  - docker run -it -d --name copernicus -e TRAVIS_JOB_ID="$TRAVIS_JOB_ID" -e TRAVIS_BRANCH="$TRAVIS_BRANCH" copernet/copernicus
 script:
-  - ./check.sh
-
+  - docker exec copernicus /bin/bash -c 'cd /go/src/github.com/copernet/copernicus && ./check.sh'
+  - 'if [ "$TRAVIS_PULL_REQUEST" = "false" ]; then docker exec copernicus goveralls -coverprofile=/go/src/github.com/copernet/copernicus/coverage.out -service=travis-ci -repotoken $COVERALLS_TOKEN; fi'
+  - docker exec copernicus /bin/bash -c 'cd /walle && pipenv run python test_runner.py' || ./dockerpush.sh $TRAVIS_JOB_ID
 notifications:
   email:
     on_success: change

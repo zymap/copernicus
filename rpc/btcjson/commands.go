@@ -5,6 +5,8 @@ import (
 	"fmt"
 )
 
+type AmountType interface{}
+
 // AddNodeSubCmd defines the type used in the addnode JSON-RPC command for the
 // sub command field.
 type AddNodeSubCmd string
@@ -37,7 +39,8 @@ func NewAddNodeCmd(addr string, subCmd AddNodeSubCmd) *AddNodeCmd {
 }
 
 type DisconnectNodeCmd struct {
-	Target string `json:"target"`
+	Address *string `json:"address"`
+	NodeID  *int32  `json:"nodeid"`
 }
 
 // TransactionInput represents the inputs to a transaction.  Specifically a
@@ -51,7 +54,7 @@ type TransactionInput struct {
 // CreateRawTransactionCmd defines the createrawtransaction JSON-RPC command.
 type CreateRawTransactionCmd struct {
 	Inputs   []TransactionInput
-	Outputs  map[string]interface{}
+	Outputs  map[string]AmountType
 	LockTime *int64
 }
 
@@ -59,7 +62,7 @@ type CreateRawTransactionCmd struct {
 // a createrawtransaction JSON-RPC command.
 //
 // Amounts are in BTC.
-func NewCreateRawTransactionCmd(inputs []TransactionInput, outputs map[string]interface{},
+func NewCreateRawTransactionCmd(inputs []TransactionInput, outputs map[string]AmountType,
 	lockTime *int64) *CreateRawTransactionCmd {
 
 	return &CreateRawTransactionCmd{
@@ -125,7 +128,7 @@ type GetAddedNodeInfoCmd struct {
 //
 // The parameters which are pointers indicate they are optional.  Passing nil
 // for optional parameters will use the default value.
-func NewGetAddedNodeInfoCmd(dns bool, node *string) *GetAddedNodeInfoCmd {
+func NewGetAddedNodeInfoCmd(node *string) *GetAddedNodeInfoCmd {
 	return &GetAddedNodeInfoCmd{
 		Node: node,
 	}
@@ -703,14 +706,14 @@ func NewUptimeCmd() *UptimeCmd {
 	return &UptimeCmd{}
 }
 
-// SignMessageWithPrivkeyCmd defines the handleSignMessageWithprivkey JSON-RPC command.
+// SignMessageWithPrivkeyCmd defines the signmessagewithprivkey JSON-RPC command.
 type SignMessageWithPrivkeyCmd struct {
 	Privkey string
 	Message string
 }
 
 // NewSignMessageWithPrivkeyCmd returns a new instance which can be used to issue a
-// validateaddress JSON-RPC command.
+// signmessagewithprivkey JSON-RPC command.
 func NewSignMessageWithPrivkeyCmd(privkey string, msg string) *SignMessageWithPrivkeyCmd {
 	return &SignMessageWithPrivkeyCmd{
 		Privkey: privkey,
@@ -781,12 +784,12 @@ func NewVerifyTxOutProofCmd(proof string) *VerifyTxOutProofCmd {
 
 // PruneBlockChainCmd defines the pruneblockchain JSON-RPC command.
 type PruneBlockChainCmd struct {
-	Height *int
+	Height int
 }
 
 // NewPruneBlockChainCmd returns a new instance which can be used to issue a
 // pruneblockchain JSON-RPC command.
-func NewPruneBlockChainCmd(height *int) *PruneBlockChainCmd {
+func NewPruneBlockChainCmd(height int) *PruneBlockChainCmd {
 	return &PruneBlockChainCmd{
 		Height: height,
 	}
@@ -807,11 +810,11 @@ type GetMempoolDescendantsCmd struct {
 // RawTxInput models the data needed for raw transaction input that is used in
 // the SignRawTransactionCmd struct.
 type RawTxInput struct {
-	Txid         string      `json:"txid"`
-	Vout         uint32      `json:"vout"`
-	ScriptPubKey string      `json:"scriptPubKey"`
-	RedeemScript *string     `json:"redeemScript"`
-	Amount       interface{} `json:"amount"`
+	Txid         string     `json:"txid"`
+	Vout         uint32     `json:"vout"`
+	ScriptPubKey string     `json:"scriptPubKey"`
+	RedeemScript *string    `json:"redeemScript"`
+	Amount       AmountType `json:"amount"`
 }
 
 // SignRawTransactionCmd defines the signrawtransaction JSON-RPC command.
@@ -822,10 +825,6 @@ type SignRawTransactionCmd struct {
 	SigHashType *string       `json:"sighashtype"`
 }
 
-type VerifyTxoutProofCmd struct {
-	Proof string
-}
-
 type SetMocktimeCmd struct {
 	Timestamp int64
 }
@@ -833,7 +832,7 @@ type SetMocktimeCmd struct {
 type SetBanCmd struct {
 	SubNet   string
 	Command  string
-	BanTime  *int `jsonrpcdefault:"86400"`
+	BanTime  *int64 `jsonrpcdefault:"86400"`
 	Absolute *bool
 }
 
@@ -858,8 +857,165 @@ type WaitForBlockHeightCmd struct {
 
 // NewWaitForBlockHeightCmd returns a new instance which can be used to issue a
 // waitforblockheight JSON-RPC command.
-func NewWaitForBlockHeightCmd() *WaitForBlockHeightCmd {
-	return &WaitForBlockHeightCmd{}
+func NewWaitForBlockHeightCmd(height int32, timeout *int) *WaitForBlockHeightCmd {
+	return &WaitForBlockHeightCmd{
+		Height:  height,
+		Timeout: timeout,
+	}
+}
+
+// GetNewAddressCmd defines the getnewaddress JSON-RPC command.
+type GetNewAddressCmd struct {
+	Account *string `json:"account" jsonrpcdefault:"\"\""`
+}
+
+// NewGetNewAddressCmd returns a new instance which can be used to issue a
+// getnewaddress JSON-RPC command.
+func NewGetNewAddressCmd(account *string) *GetNewAddressCmd {
+	return &GetNewAddressCmd{
+		Account: account,
+	}
+}
+
+// ListUnspentCmd defines the listunspent JSON-RPC command.
+type ListUnspentCmd struct {
+	MinConf       *int32    `json:"minconf" jsonrpcdefault:"1"`
+	MaxConf       *int32    `json:"maxconf" jsonrpcdefault:"9999999"`
+	Addresses     *[]string `json:"addresses"`
+	IncludeUnsafe *bool     `json:"include_unsafe" jsonrpcdefault:"true"`
+}
+
+// NewListUnspentCmd returns a new instance which can be used to issue a
+// listunspent JSON-RPC command.
+func NewListUnspentCmd(minConf *int32, maxConf *int32, addresses *[]string, includeUnsafe *bool) *ListUnspentCmd {
+	return &ListUnspentCmd{
+		MinConf:       minConf,
+		MaxConf:       maxConf,
+		Addresses:     addresses,
+		IncludeUnsafe: includeUnsafe,
+	}
+}
+
+// SetTxFeeCmd defines the settxfee JSON-RPC command.
+type SetTxFeeCmd struct {
+	Amount AmountType `json:"amount"`
+}
+
+// NewSetTxFeeCmd returns a new instance which can be used to issue a
+// settxfee JSON-RPC command.
+func NewSetTxFeeCmd(amount AmountType) *SetTxFeeCmd {
+	return &SetTxFeeCmd{
+		Amount: amount,
+	}
+}
+
+// SendToAddressCmd defines the sendtoaddress JSON-RPC command.
+type SendToAddressCmd struct {
+	Address               string     `json:"address"`
+	Amount                AmountType `json:"amount"`
+	Comment               *string    `json:"comment"`
+	CommentTo             *string    `json:"comment_to"`
+	SubtractFeeFromAmount *bool      `json:"subtractfeefromamount" jsonrpcdefault:"false"`
+}
+
+// NewSendToAddressCmd returns a new instance which can be used to issue a
+// sendtoaddress JSON-RPC command.
+func NewSendToAddressCmd(address string, amount AmountType, comment *string,
+	commentTo *string, subtractFeeFromAmount *bool) *SendToAddressCmd {
+	return &SendToAddressCmd{
+		Address:               address,
+		Amount:                amount,
+		Comment:               comment,
+		CommentTo:             commentTo,
+		SubtractFeeFromAmount: subtractFeeFromAmount,
+	}
+}
+
+// GetBalanceCmd defines the getbalance JSON-RPC command.
+type GetBalanceCmd struct {
+	Account *string
+	MinConf *int `jsonrpcdefault:"1"`
+}
+
+// NewGetBalanceCmd returns a new instance which can be used to issue a
+// getbalance JSON-RPC command.
+//
+// The parameters which are pointers indicate they are optional.  Passing nil
+// for optional parameters will use the default value.
+func NewGetBalanceCmd(account *string, minConf *int) *GetBalanceCmd {
+	return &GetBalanceCmd{
+		Account: account,
+		MinConf: minConf,
+	}
+}
+
+// GetTransactionCmd defines the gettransaction JSON-RPC command.
+type GetTransactionCmd struct {
+	Txid             string
+	IncludeWatchOnly *bool `jsonrpcdefault:"false"`
+}
+
+// NewGetTransactionCmd returns a new instance which can be used to issue a
+// gettransaction JSON-RPC command.
+//
+// The parameters which are pointers indicate they are optional.  Passing nil
+// for optional parameters will use the default value.
+func NewGetTransactionCmd(txHash string, includeWatchOnly *bool) *GetTransactionCmd {
+	return &GetTransactionCmd{
+		Txid:             txHash,
+		IncludeWatchOnly: includeWatchOnly,
+	}
+}
+
+type SendManyCmd struct {
+	FromAccount     string                `json:"fromaccount"`
+	Amounts         map[string]AmountType `json:"amounts"`
+	MinConf         *int32                `json:"minconf" jsonrpcdefault:"1"`
+	Comment         *string               `json:"comment"`
+	SubTractFeeFrom *[]string             `json:"subtractfeefrom"`
+}
+
+func NewSendManyCmd(fromAccount string, amounts map[string]AmountType, minConf *int32,
+	comment *string, subTractFeeFrom *[]string) *SendManyCmd {
+	return &SendManyCmd{
+		FromAccount:     fromAccount,
+		Amounts:         amounts,
+		MinConf:         minConf,
+		Comment:         comment,
+		SubTractFeeFrom: subTractFeeFrom,
+	}
+}
+
+type FundRawTxoptions struct {
+	ChangeAddress          string `json:"changeaddress"`
+	ChangePosition         int    `json:"changeposition"`
+	IncludeWatching        bool   `json:"includewatching" jsonrpcdefault:"false"`
+	LockUnspents           bool   `json:"lockunspents" jsonrpcdefault:"false"`
+	ReserveChangeKey       bool   `json:"reservechangekey" jsonrpcdefault:"true"`
+	FeeRate                int    `json:"feerate"`
+	SubtractFeeFromOutputs *[]int `json:"subtractfeefromoutputs"`
+}
+type FundRawTransactionCmd struct {
+	HexTx   string            `json:"hexstring"`
+	Options *FundRawTxoptions `json:"options"`
+}
+
+func NewFundRawTransactionCmd(hexTx string) *FundRawTransactionCmd {
+	return &FundRawTransactionCmd{
+		HexTx: hexTx,
+	}
+}
+
+type AddMultiSigAddressCmd struct {
+	RequiredNum int      `json:"requirednum"`
+	Keys        []string `json:"keys"`
+}
+
+func NewAddMultiSigAddressCmd(num int, s []string) *AddMultiSigAddressCmd {
+	return &AddMultiSigAddressCmd{
+		RequiredNum: num,
+		Keys:        s,
+	}
 }
 
 func init() {
@@ -916,7 +1072,7 @@ func init() {
 	MustRegisterCmd("getmempoolancestors", (*GetMempoolAncestorsCmd)(nil), flags)
 	MustRegisterCmd("getmempooldescendants", (*GetMempoolDescendantsCmd)(nil), flags)
 	MustRegisterCmd("signrawtransaction", (*SignRawTransactionCmd)(nil), flags)
-	MustRegisterCmd("verifytxoutproof", (*VerifyTxoutProofCmd)(nil), flags)
+	MustRegisterCmd("verifytxoutproof", (*VerifyTxOutProofCmd)(nil), flags)
 	MustRegisterCmd("setmocktime", (*SetMocktimeCmd)(nil), flags)
 
 	MustRegisterCmd("disconnectnode", (*DisconnectNodeCmd)(nil), flags)
@@ -934,4 +1090,13 @@ func init() {
 	MustRegisterCmd("waitforblockheight", (*WaitForBlockHeightCmd)(nil), flags)
 	MustRegisterCmd("echo", (*EchoCmd)(nil), flags)
 
+	MustRegisterCmd("getnewaddress", (*GetNewAddressCmd)(nil), flags)
+	MustRegisterCmd("listunspent", (*ListUnspentCmd)(nil), flags)
+	MustRegisterCmd("settxfee", (*SetTxFeeCmd)(nil), flags)
+	MustRegisterCmd("sendtoaddress", (*SendToAddressCmd)(nil), flags)
+	MustRegisterCmd("getbalance", (*GetBalanceCmd)(nil), flags)
+	MustRegisterCmd("gettransaction", (*GetTransactionCmd)(nil), flags)
+	MustRegisterCmd("sendmany", (*SendManyCmd)(nil), flags)
+	MustRegisterCmd("fundrawtransaction", (*FundRawTransactionCmd)(nil), flags)
+	MustRegisterCmd("addmultisigaddress", (*AddMultiSigAddressCmd)(nil), flags)
 }
