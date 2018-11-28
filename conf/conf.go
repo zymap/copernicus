@@ -19,7 +19,7 @@ import (
 const (
 	AppMajor uint = 0
 	AppMinor uint = 0
-	AppPatch uint = 1
+	AppPatch uint = 6
 
 	// AppPreRelease MUST only contain characters from semanticAlphabet
 	// per the semantic versioning spec.
@@ -96,6 +96,7 @@ type Configuration struct {
 		NoOnion             bool     `default:"true"`  // Disable connecting to tor hidden services
 		Upnp                bool     `default:"false"` // Use UPnP to map our listening port outside of NAT
 		ExternalIPs         []string // Add an ip to the list of local addresses we claim to listen on to peers
+		MaxTimeAdjustment   uint64   `default:"4200"`
 		//AddCheckpoints      []model.Checkpoint
 	}
 	AddrMgr struct {
@@ -301,6 +302,9 @@ func InitConfig(args []string) *Configuration {
 	if opts.BanScore > 0 {
 		config.P2PNet.BanThreshold = opts.BanScore
 	}
+	if opts.MaxTimeAdjustment > 0 {
+		config.P2PNet.MaxTimeAdjustment = opts.MaxTimeAdjustment
+	}
 
 	return config
 }
@@ -380,7 +384,8 @@ func SetUnitTestDataDir(config *Configuration) (dirPath string, err error) {
 		return "", errors.New("test data directory create failed: " + err.Error())
 	}
 
-	_, err = CopyFile(filepath.Join(DataDir, defaultConfigFilename), filepath.Join(testDataDir, defaultConfigFilename))
+	defaultDataDir := AppDataDir(defaultDataDirname, false)
+	_, err = CopyFile(filepath.Join(defaultDataDir, defaultConfigFilename), filepath.Join(testDataDir, defaultConfigFilename))
 	if err != nil {
 		return "", err
 	}
